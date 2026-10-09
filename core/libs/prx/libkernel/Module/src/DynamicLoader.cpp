@@ -162,6 +162,19 @@ static void InitializeDeferredModule(HMODULE native) {
 }
 #endif
 
+#ifdef _WIN32
+static HMODULE FindExistingModule(const std::filesystem::path& path, const std::filesystem::path& resolved) {
+    HMODULE handle = nullptr;
+    if (GetModuleHandleExW(0, resolved.filename().c_str(), &handle)) return handle;
+    const auto name = path.filename().wstring();
+    if (GetModuleHandleExW(0, name.c_str(), &handle)) return handle;
+    if (!name.ends_with(L".guest.prx") && GetModuleHandleExW(0, (name + L".guest.prx").c_str(), &handle)) return handle;
+    if (!name.ends_with(L".prx") && GetModuleHandleExW(0, (name + L".prx.guest.prx").c_str(), &handle)) return handle;
+    if (!name.ends_with(L".prx") && GetModuleHandleExW(0, (name + L".prx").c_str(), &handle)) return handle;
+    return nullptr;
+}
+#endif
+
 void* APS5_VABI dlopen_nid_postfix(const char* path, int flags) {
     if ((flags & ~0x103) || (flags & 3) == 0 || (flags & 3) == 3) {
         Error("dlopen: unsupported flags"); return nullptr;
@@ -176,8 +189,16 @@ void* APS5_VABI dlopen_nid_postfix(const char* path, int flags) {
         } else {
             if (!*path) { Error("dlopen: empty module path"); return nullptr; }
             const auto resolved = RelinkedModulePath_nid_no_patch(ResolvePath_nid_no_patch(path));
-            module->native = LoadLibraryExW(resolved.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
-            if (module->native) InitializeDeferredModule(static_cast<HMODULE>(module->native));
+            if (auto existing = FindExistingModule(path, resolved)) {
+                module->native = existing;
+            } else {
+                module->native = LoadLibraryExW(resolved.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+                if (!module->native) {
+                    const auto fallback = RelinkedModulePath_nid_no_patch(ResolvePath_nid_no_patch((std::filesystem::path("sce_module") / resolved.filename()).string().c_str()));
+                    module->native = LoadLibraryExW(fallback.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+                }
+                if (module->native) InitializeDeferredModule(static_cast<HMODULE>(module->native));
+            }
         }
         if (!module->native) {
             char message[128];
