@@ -3065,8 +3065,8 @@ VkBufferUsageFlags gpuCopyUsage(bool addressable) {
 constexpr std::uint64_t SweptShadowMax = std::uint64_t{16} << 20u;
 
 bool writtenShadowEnabled() {
-    static const bool disabled = std::getenv("APS5_NO_WRITTEN_SHADOW") != nullptr;
-    return !disabled;
+    static const bool enabled = std::getenv("APS5_WRITTEN_SHADOW") != nullptr && std::getenv("APS5_NO_WRITTEN_SHADOW") == nullptr;
+    return enabled;
 }
 
 bool atomicStagingEnabled() {

@@ -107,6 +107,7 @@ void DisplayWindow::UpdateTitle() {
     require(window != nullptr, "window must exist before updating title");
     static const AppTitle title = GetAppTitle_nid_postfix();
     static std::uint64_t fpsStart = sceKernelGetProcessTimeCounter();
+    static std::uint64_t lastTitleUpdate = 0;
     static std::uint64_t frameNum = 0;
     static std::uint64_t fpsFrames = 0;
     static double currentFps = 0.0;
@@ -114,14 +115,17 @@ void DisplayWindow::UpdateTitle() {
     const auto frequency = sceKernelGetProcessTimeCounterFrequency();
     frameNum++;
     fpsFrames++;
-    if (now - fpsStart >= frequency * 2) {
+    if (now - fpsStart >= frequency) {
         currentFps = static_cast<double>(fpsFrames) * static_cast<double>(frequency) / static_cast<double>(now - fpsStart);
         fpsStart = now;
         fpsFrames = 0;
     }
-    char text[160];
-    std::snprintf(text, sizeof(text), "%s | FPS: %.2f (%llu)", title.value, currentFps, static_cast<unsigned long long>(frameNum));
-    SDL_SetWindowTitle(window, text);
+    if (now - lastTitleUpdate >= frequency / 4 || lastTitleUpdate == 0) {
+        lastTitleUpdate = now;
+        char text[160];
+        std::snprintf(text, sizeof(text), "%s | FPS: %.2f (%llu)", title.value, currentFps, static_cast<unsigned long long>(frameNum));
+        SDL_SetWindowTitle(window, text);
+    }
 }
 
 void DisplayWindow::installSubclass() {
