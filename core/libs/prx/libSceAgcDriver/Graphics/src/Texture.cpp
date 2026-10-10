@@ -2087,8 +2087,9 @@ bool StorageTexture::Refresh() {
             continue;
         }
         if (changed[layer]) {
-            if (tracked || compared) {
-                pendingResults = true;
+            const bool layerCpuWrote = layer < cpuBlocks.size() && cpuBlocks[layer] != 0;
+            if ((tracked || compared) && (layerCpuWrote || keysChanged)) {
+                if (layerCpuWrote) pendingResults = true;
                 if (blockUnits && droppable(layer)) {
                     CaptureTrace::Log("drop-unit image=%llx unit=%u generation=%llu stamped=%d keys=%d", static_cast<unsigned long long>(descriptor.baseAddress), layer, static_cast<unsigned long long>(layerGeneration[layer]), layer < stampedBlocks.size() && stampedBlocks[layer] != 0, static_cast<int>(keys));
                     layerPending[layer] = false;
@@ -2099,12 +2100,14 @@ bool StorageTexture::Refresh() {
                 anyStored = true;
             } else {
                 changed[layer] = false;
+                layerGeneration[layer] = current;
                 continue;
             }
         } else {
             continue;
         }
     }
+    refreshGeneration();
     if (anyStored && !keysChanged && descriptor.dccAddress != 0 && (IsDccClear(uploadedKeys) || uploadedKeys == DccKeys::ClearSingle)) stored.assign(trackedLayers, true);
     if (pendingResults) {
         static std::atomic<int> reports{0};
