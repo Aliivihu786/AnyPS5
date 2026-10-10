@@ -39,9 +39,16 @@ def compute_stats(values):
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python analyze_bench.py <csv_path>")
+        print("Usage: python analyze_bench.py <csv_path> [--window start end]")
         sys.exit(1)
     csv_path = sys.argv[1]
+    w_start = 40
+    w_end = 80
+    if "--window" in sys.argv:
+        idx = sys.argv.index("--window")
+        if idx + 2 < len(sys.argv):
+            w_start = int(sys.argv[idx + 1])
+            w_end = int(sys.argv[idx + 2])
     rows = []
     with open(csv_path, "r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -50,7 +57,7 @@ def main():
             fps = parse_fps(row.get("Title", ""))
             rows.append((sec, fps, row.get("Title", "")))
     full_fps = [r[1] for r in rows]
-    steady_fps = [r[1] for r in rows if 40 <= r[0] <= 80]
+    steady_fps = [r[1] for r in rows if w_start <= r[0] <= w_end]
     full_stats = compute_stats(full_fps)
     steady_stats = compute_stats(steady_fps)
     print(f"=== Benchmark Analysis: {csv_path} ===")
@@ -62,7 +69,7 @@ def main():
     print(f"  Mean:   {full_stats['mean']:.2f}")
     print(f"  P90:    {full_stats['p90']:.2f}")
     print(f"  Max:    {full_stats['max']:.2f}")
-    print(f"Steady-State Window (s40 - s80):")
+    print(f"Steady-State Window (s{w_start} - s{w_end}):")
     print(f"  Samples:{steady_stats['count']}")
     print(f"  Min:    {steady_stats['min']:.2f}")
     print(f"  P10:    {steady_stats['p10']:.2f}")
