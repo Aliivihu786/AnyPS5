@@ -3512,7 +3512,7 @@ std::size_t ShaderResources::addGuestBuffer(std::span<const std::uint32_t> words
         allocations.push_back({0, EmptyBufferBytes, false, nullptr, ShaderRecompiler::DescriptorRole::GuestBuffers, false});
         return allocations.size() - 1;
     }
-    Require(descriptor.Type() == 0u, "buffer descriptor uses an unsupported type");
+    Require(descriptor.Type() <= 1u, "buffer descriptor uses an unsupported type");
 
     Require(byteSize <= context.limits.maxStorageBufferRange, "shader buffer exceeds descriptor range limit");
     Require(byteSize <= std::numeric_limits<std::size_t>::max(), "shader buffer size exceeds host address space");

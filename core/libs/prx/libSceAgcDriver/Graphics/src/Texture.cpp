@@ -2081,27 +2081,29 @@ bool StorageTexture::Refresh() {
     }
     for (std::uint32_t layer = 0; layer < trackedLayers; ++layer) {
         if (!layerPending[layer]) continue;
-        if (keyFlip && layerGeneration[layer] != 0 && stampedBlocks[layer] != GuestMemory::BlockWritten) {
+        if (keyFlip && layerGeneration[layer] != 0 && (tracked || compared ? stampedBlocks[layer] != GuestMemory::BlockWritten : true)) {
             changed[layer] = false;
             keyFlipKept.fetch_add(1, std::memory_order_relaxed);
-            if (direct) continue;
-            stored[layer] = true;
-            anyStored = true;
             continue;
         }
         if (changed[layer]) {
-            pendingResults = true;
-            if (blockUnits && droppable(layer)) {
-                CaptureTrace::Log("drop-unit image=%llx unit=%u generation=%llu stamped=%d keys=%d", static_cast<unsigned long long>(descriptor.baseAddress), layer, static_cast<unsigned long long>(layerGeneration[layer]), layer < stampedBlocks.size() && stampedBlocks[layer] != 0, static_cast<int>(keys));
-                layerPending[layer] = false;
-                dropped = true;
+            if (tracked || compared) {
+                pendingResults = true;
+                if (blockUnits && droppable(layer)) {
+                    CaptureTrace::Log("drop-unit image=%llx unit=%u generation=%llu stamped=%d keys=%d", static_cast<unsigned long long>(descriptor.baseAddress), layer, static_cast<unsigned long long>(layerGeneration[layer]), layer < stampedBlocks.size() && stampedBlocks[layer] != 0, static_cast<int>(keys));
+                    layerPending[layer] = false;
+                    dropped = true;
+                    continue;
+                }
+                stored[layer] = true;
+                anyStored = true;
+            } else {
+                changed[layer] = false;
                 continue;
             }
-        } else if (direct) {
+        } else {
             continue;
         }
-        stored[layer] = true;
-        anyStored = true;
     }
     if (anyStored && !keysChanged && descriptor.dccAddress != 0 && (IsDccClear(uploadedKeys) || uploadedKeys == DccKeys::ClearSingle)) stored.assign(trackedLayers, true);
     if (pendingResults) {
