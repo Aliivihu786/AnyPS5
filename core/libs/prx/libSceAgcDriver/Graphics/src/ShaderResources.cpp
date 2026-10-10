@@ -744,6 +744,17 @@ std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const s
                 if (profile) LookupOutcomes::Add(LookupOutcomes::SampledHitSnapshot, start);
                 return it->texture;
             }
+            if (*keys == DccKeys::Uncompressed && it->texture != nullptr && !it->texture->ViewsStorageImage()) {
+                if (Recorder::SnapshotWriteOverlaps(address, bytes)) counters.pendingReads.fetch_add(1, std::memory_order_relaxed);
+                ReadTextureSurface(resource, *keys, it->bytes);
+                it->texture->Update(*context.detiler, it->bytes);
+                it->generation = generation;
+                touchTexture(cache, it);
+                logLookup({it->texture.get(), resource, guestBytes, *keys, generation, nullptr});
+                reportTextureCounters();
+                if (profile) LookupOutcomes::Add(LookupOutcomes::SampledHitSnapshot, start);
+                return it->texture;
+            }
         }
         eraseTexture(cache, it);
         ++cache.counts.stale;
