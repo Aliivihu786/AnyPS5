@@ -56,6 +56,12 @@ FontTextCharacter* APS5_VABI sceFontWritingRefersRenderStepCharacter(FontWriting
 const void* APS5_VABI sceFontSelectLibraryFt(int);
 const void* APS5_VABI sceFontSelectRendererFt(int);
 int APS5_VABI sceFontCharacterGetSyllableStringState(const FontTextCharacter*, int*);
+int APS5_VABI sceFontCreateWords(const FontMemory*, FontTextSource*, const void*, void**);
+int APS5_VABI sceFontDestroyWords(void**);
+int APS5_VABI sceFontWordsFindWordCharacters(void*, void*, void*, void**, void**);
+void* APS5_VABI sceFontCharactersRefersTextCodes(void*, void*, FontTextCodes*);
+void* APS5_VABI sceFontTextCodesStepNext(void*);
+void* APS5_VABI sceFontTextCodesStepBack(void*);
 }
 
 static void Check(bool value, int line) {
@@ -362,6 +368,39 @@ int main() {
     Require(sceFontWritingRefersRenderStepCharacter(&writing, &out.letter) == characters + 1 && out.guard == guard);
     Require(out.letter->x == step->x && out.letter->Components.textsIndex == 1 && out.letter->Components.glyphsIndex == 1);
     Require(sceFontWritingRefersRenderStepCharacter(&writing, nullptr) == characters + 1);
+
+    FontTextCodes codes{};
+    void* stepCode = sceFontCharactersRefersTextCodes(characters, nullptr, &codes);
+    Require(stepCode == characters && codes.code == 'A');
+    void* nextCode = sceFontTextCodesStepNext(stepCode);
+    Require(nextCode == characters + 1);
+    void* prevCode = sceFontTextCodesStepBack(nextCode);
+    Require(prevCode == characters);
+    Require(sceFontTextCodesStepBack(characters) == nullptr);
+    Require(sceFontTextCodesStepNext(characters + 1) == nullptr);
+    Require(sceFontCharactersRefersTextCodes(nextCode, nullptr, &codes) == characters + 1 && codes.code == 'V');
+    Require(sceFontCharactersRefersTextCodes(characters, characters, &codes) == nullptr);
+
+    ParsedText wordsText{"A V", 0, font};
+    FontTextSource wordsSource{};
+    Require(sceFontTextSourceInit(&wordsSource, wordsText.text, 3, ParseText, &wordsText) == SCE_FONT_OK);
+    FontString wordsString = nullptr;
+    Require(sceFontCreateString(&memory, &wordsSource, nullptr, &wordsString) == SCE_FONT_OK && wordsString != nullptr);
+    std::uint32_t wordsCharCount = 0;
+    FontTextCharacter* wordsChars = sceFontStringRefersTextCharacters(wordsString, &wordsCharCount);
+    Require(wordsChars != nullptr && wordsCharCount == 3);
+    void* wordsObj = nullptr;
+    Require(sceFontCreateWords(&memory, &wordsSource, nullptr, &wordsObj) == SCE_FONT_OK && wordsObj != nullptr);
+    void* lastChar = nullptr;
+    void* nextChar = nullptr;
+    Require(sceFontWordsFindWordCharacters(wordsObj, wordsChars, nullptr, &lastChar, &nextChar) == SCE_FONT_OK);
+    Require(lastChar == wordsChars && nextChar == wordsChars + 2);
+    Require(sceFontWordsFindWordCharacters(wordsObj, nextChar, nullptr, &lastChar, &nextChar) == SCE_FONT_OK);
+    Require(lastChar == wordsChars + 2 && nextChar == nullptr);
+    Require(sceFontDestroyWords(&wordsObj) == SCE_FONT_OK && wordsObj == nullptr);
+    Require(sceFontDestroyWords(&wordsObj) == SCE_FONT_ERROR_INVALID_WORDS);
+    Require(sceFontDestroyString(&wordsString) == SCE_FONT_OK);
+
     Require(sceFontDestroyString(&string) == SCE_FONT_OK);
     Require(sceFontCloseFont(font) == SCE_FONT_OK);
 

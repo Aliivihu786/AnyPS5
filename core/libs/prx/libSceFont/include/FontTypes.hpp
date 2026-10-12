@@ -308,6 +308,11 @@ struct FontTextSource {
     void* systemUse[5];
 };
 
+struct FontTextCodes {
+    void* order;
+    std::uint32_t code;
+};
+
 struct FontCreateStringDetail {
     std::uint16_t detailId;
     std::uint8_t detailType;
@@ -444,5 +449,7 @@ static_assert(sizeof(FontWritingLetterStep) == 0x40);
 static_assert(sizeof(FontWritingMetrics) == 0x18);
 static_assert(sizeof(FontWritingLineStep) == 0x40);
 static_assert(offsetof(FontWritingLineStep, writingOrderer) == 0x18);
+static_assert(sizeof(FontTextCodes) == 0x10);
+static_assert(offsetof(FontTextCodes, code) == 0x8);
 
 #endif
