@@ -487,6 +487,60 @@ FontGlyphOutline* APS5_VABI sceFontGlyphRefersOutline(FontGlyph glyph) {
     return &generated->outline;
 }
 
+int APS5_VABI sceFontGlyphRenderImage(FontGlyph glyph, FontStyleFrame* frame, void* renderer, FontRenderSurface* surface, float x, float y, FontGlyphMetrics* metrics, FontRenderOutput* result) {
+    (void)renderer;
+    if (!glyph || glyph->magic != GLYPH_MAGIC) {
+        ClearRenderOutputs(metrics, result);
+        return SCE_FONT_ERROR_INVALID_GLYPH;
+    }
+    auto* generated = TryGetGeneratedGlyph(glyph);
+    if (!generated || !generated->owner) {
+        ClearRenderOutputs(metrics, result);
+        return SCE_FONT_ERROR_INVALID_GLYPH;
+    }
+    if (frame && surface) {
+        SurfaceSystemUse(surface)->styleframe = frame;
+        surface->styleFlag |= 0x1;
+    }
+    return sceFontRenderCharGlyphImage(generated->owner, generated->codepoint, surface, x, y, metrics, result);
+}
+
+int APS5_VABI sceFontGlyphRenderImageHorizontal(FontGlyph glyph, FontStyleFrame* frame, void* renderer, FontRenderSurface* surface, float x, float y, FontGlyphMetrics* metrics, FontRenderOutput* result) {
+    (void)renderer;
+    if (!glyph || glyph->magic != GLYPH_MAGIC) {
+        ClearRenderOutputs(metrics, result);
+        return SCE_FONT_ERROR_INVALID_GLYPH;
+    }
+    auto* generated = TryGetGeneratedGlyph(glyph);
+    if (!generated || !generated->owner) {
+        ClearRenderOutputs(metrics, result);
+        return SCE_FONT_ERROR_INVALID_GLYPH;
+    }
+    if (frame && surface) {
+        SurfaceSystemUse(surface)->styleframe = frame;
+        surface->styleFlag |= 0x1;
+    }
+    return sceFontRenderCharGlyphImageHorizontal(generated->owner, generated->codepoint, surface, x, y, metrics, result);
+}
+
+int APS5_VABI sceFontGlyphRenderImageVertical(FontGlyph glyph, FontStyleFrame* frame, void* renderer, FontRenderSurface* surface, float x, float y, FontGlyphMetrics* metrics, FontRenderOutput* result) {
+    (void)renderer;
+    if (!glyph || glyph->magic != GLYPH_MAGIC) {
+        ClearRenderOutputs(metrics, result);
+        return SCE_FONT_ERROR_INVALID_GLYPH;
+    }
+    auto* generated = TryGetGeneratedGlyph(glyph);
+    if (!generated || !generated->owner) {
+        ClearRenderOutputs(metrics, result);
+        return SCE_FONT_ERROR_INVALID_GLYPH;
+    }
+    if (frame && surface) {
+        SurfaceSystemUse(surface)->styleframe = frame;
+        surface->styleFlag |= 0x1;
+    }
+    return sceFontRenderCharGlyphImageVertical(generated->owner, generated->codepoint, surface, x, y, metrics, result);
+}
+
 }
 
 #pragma GCC visibility pop
