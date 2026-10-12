@@ -405,6 +405,27 @@ int APS5_VABI sceFontSetFontsOpenMode(FontLibrary library, std::uint32_t openMod
     return SCE_FONT_OK;
 }
 
+int APS5_VABI sceFontSupportGlyphs(FontLibrary library) {
+    auto* lib = static_cast<FontLibNative*>(library);
+    if (!lib || lib->magic != LIBRARY_MAGIC) return SCE_FONT_ERROR_INVALID_LIBRARY;
+    return SCE_FONT_OK;
+}
+
+int APS5_VABI sceFontControl(FontLibrary library, int command, void* arg) {
+    (void)command;
+    (void)arg;
+    auto* lib = static_cast<FontLibNative*>(library);
+    if (!lib || lib->magic != LIBRARY_MAGIC) return SCE_FONT_ERROR_INVALID_LIBRARY;
+    return SCE_FONT_OK;
+}
+
+int APS5_VABI sceFontGetGlyphExpandBufferState(FontLibrary library, void* state) {
+    auto* lib = static_cast<FontLibNative*>(library);
+    if (!lib || lib->magic != LIBRARY_MAGIC) return SCE_FONT_ERROR_INVALID_LIBRARY;
+    if (state) *static_cast<std::uint32_t*>(state) = 0;
+    return SCE_FONT_OK;
+}
+
 }
 
 #pragma GCC visibility pop

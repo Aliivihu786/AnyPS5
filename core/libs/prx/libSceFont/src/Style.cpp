@@ -354,6 +354,29 @@ int APS5_VABI sceFontStyleFrameGetEffectWeight(const FontStyleFrame* styleFrame,
     return SCE_FONT_OK;
 }
 
+int APS5_VABI sceFontDefineAttribute(FontHandle fontHandle, int attribute, int* oldAttribute) {
+    (void)attribute;
+    auto* font = GetNativeFont(fontHandle);
+    if (!font || font->magic != HANDLE_MAGIC) return SCE_FONT_ERROR_INVALID_FONT_HANDLE;
+    if (oldAttribute) *oldAttribute = 0;
+    return SCE_FONT_OK;
+}
+
+int APS5_VABI sceFontGetAttribute(FontHandle fontHandle, int attribute, int* nowAttribute) {
+    (void)attribute;
+    auto* font = GetNativeFont(fontHandle);
+    if (!font || font->magic != HANDLE_MAGIC) return SCE_FONT_ERROR_INVALID_FONT_HANDLE;
+    if (nowAttribute) *nowAttribute = 0;
+    return SCE_FONT_OK;
+}
+
+int APS5_VABI sceFontGetFontStyleInformation(FontHandle fontHandle, void* styleInfo) {
+    auto* font = GetNativeFont(fontHandle);
+    if (!font || font->magic != HANDLE_MAGIC) return SCE_FONT_ERROR_INVALID_FONT_HANDLE;
+    if (!styleInfo) return SCE_FONT_ERROR_INVALID_PARAMETER;
+    return SCE_FONT_OK;
+}
+
 }
 
 #pragma GCC visibility pop

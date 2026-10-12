@@ -426,6 +426,16 @@ int APS5_VABI sceFontGlyphDefineAttribute(FontGlyph glyph, std::uint32_t attribu
     return SCE_FONT_OK;
 }
 
+int APS5_VABI sceFontGlyphGetAttribute(FontGlyph glyph, int attribute, int* nowAttribute) {
+    (void)attribute;
+    if (!glyph || glyph->magic != GLYPH_MAGIC) {
+        if (nowAttribute) *nowAttribute = 0;
+        return SCE_FONT_ERROR_INVALID_GLYPH;
+    }
+    if (nowAttribute) *nowAttribute = 0;
+    return SCE_FONT_OK;
+}
+
 int APS5_VABI sceFontGlyphGetGlyphForm(FontGlyph glyph) {
     if (!glyph || glyph->magic != GLYPH_MAGIC) return SCE_FONT_ERROR_INVALID_GLYPH;
     return glyph->glyph_form;
