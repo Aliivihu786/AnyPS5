@@ -44,12 +44,17 @@ static int NativeOpen(const std::filesystem::path& p, int nativeFlags, std::uint
     if (descriptor < 0) CloseHandle(handle);
     return descriptor;
 }
+extern "C" _invalid_parameter_handler _set_thread_local_invalid_parameter_handler(_invalid_parameter_handler);
+static void IgnoreInvalidParameter(const wchar_t*, const wchar_t*, const wchar_t*, unsigned int, std::uintptr_t) {}
 static std::int64_t NativeLseek(int fd, std::int64_t offset, int whence) {
     const auto positioned = File::LockPositionedTransfer(fd);
     const auto result = File::SeekSharedMemory_nid_no_patch(fd, offset, whence);
     if (result != -2) return result;
+    const auto previous = _set_thread_local_invalid_parameter_handler(IgnoreInvalidParameter);
     const auto position = ::_lseeki64(fd, offset, whence);
-    if (position < 0 || GetFileType(reinterpret_cast<HANDLE>(::_get_osfhandle(fd))) != FILE_TYPE_PIPE) return position;
+    const auto type = GetFileType(reinterpret_cast<HANDLE>(::_get_osfhandle(fd)));
+    _set_thread_local_invalid_parameter_handler(previous);
+    if (position < 0 || type != FILE_TYPE_PIPE) return position;
     errno = ESPIPE;
     return -1;
 }
@@ -58,7 +63,9 @@ static int NativeRead(int fd, void* buf, std::size_t n) {
         throw std::runtime_error("sceKernelRead: nbytes exceeds platform limit");
     }
     const auto positioned = File::LockPositionedTransfer(fd);
+    const auto previous = _set_thread_local_invalid_parameter_handler(IgnoreInvalidParameter);
     const int result = ::_read(fd, buf, static_cast<unsigned int>(n));
+    _set_thread_local_invalid_parameter_handler(previous);
     if (result < 0 && _doserrno == ERROR_NO_DATA) errno = EAGAIN;
     if (result == 0 && File::DirectoryDescriptorPath(fd)) {
         errno = EISDIR;
@@ -73,12 +80,12 @@ static int NativeWrite(int fd, const void* buf, std::size_t n) {
     const auto positioned = File::LockPositionedTransfer(fd);
     const auto shared = File::WriteSharedMemory_nid_no_patch(fd, buf, n);
     if (shared != -2) return static_cast<int>(shared);
+    const auto previous = _set_thread_local_invalid_parameter_handler(IgnoreInvalidParameter);
     const int result = ::_write(fd, buf, static_cast<unsigned int>(n));
+    _set_thread_local_invalid_parameter_handler(previous);
     if (result < 0 && errno == ENOSPC && _doserrno == 0 && ::GetFileType(reinterpret_cast<HANDLE>(::_get_osfhandle(fd))) == FILE_TYPE_PIPE) errno = EAGAIN;
     return result;
 }
-extern "C" _invalid_parameter_handler _set_thread_local_invalid_parameter_handler(_invalid_parameter_handler);
-static void IgnoreInvalidParameter(const wchar_t*, const wchar_t*, const wchar_t*, unsigned int, std::uintptr_t) {}
 static int NativeClose(int fd) {
     const auto previous = _set_thread_local_invalid_parameter_handler(IgnoreInvalidParameter);
     const int result = ::_close(fd);
