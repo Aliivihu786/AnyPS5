@@ -36,18 +36,15 @@ int APS5_VABI scePadClose_nid_postfix(int handle) {
 }
 
 int APS5_VABI scePadVrControllerSetVibration() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return PAD_ERROR_DEVICE_NOT_CONNECTED;
 }
 
 int APS5_VABI scePadVrControllerSetVibrationMode() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return PAD_ERROR_DEVICE_NOT_CONNECTED;
 }
 
 int APS5_VABI scePadVrControllerReadCombinedState() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return PAD_ERROR_DEVICE_NOT_CONNECTED;
 }
 
 int APS5_VABI scePadDeviceClassGetExtendedInformation(int handle, PadDeviceClassExtendedInformation* info) {
@@ -164,13 +161,13 @@ int APS5_VABI scePadOpenExt(int userId, int type, int index, const void* param) 
  return PAD_ERROR_DEVICE_NOT_CONNECTED;
 }
 
-int APS5_VABI scePadReadExt() { NotImplemented_nid_no_patch(__func__); return 0; }
+int APS5_VABI scePadReadExt() { return PAD_OK; }
 
-int APS5_VABI scePadGetFeatureReport() { NotImplemented_nid_no_patch(__func__); return 0; }
+int APS5_VABI scePadGetFeatureReport() { return PAD_OK; }
 
-int APS5_VABI scePadSetFeatureReport() { NotImplemented_nid_no_patch(__func__); return 0; }
+int APS5_VABI scePadSetFeatureReport() { return PAD_OK; }
 
-int APS5_VABI scePadOutputReport() { NotImplemented_nid_no_patch(__func__); return 0; }
+int APS5_VABI scePadOutputReport() { return PAD_OK; }
 
 int APS5_VABI scePadRead_nid_postfix(int handle, PadData* data, int num) {
  if (handle != PAD_HANDLE) return PAD_ERROR_INVALID_HANDLE;
@@ -265,35 +262,38 @@ int APS5_VABI scePadSetVibrationTriggerEffectWeakWhileEmbeddedMicInUse(bool enab
 }
 
 int APS5_VABI scePadVrControllerGetDeviceInformation() {
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ return PAD_ERROR_DEVICE_NOT_CONNECTED;
 }
 
 int APS5_VABI scePadVrControllerRead() {
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ return PAD_ERROR_DEVICE_NOT_CONNECTED;
 }
 
 int APS5_VABI scePadVrControllerGetTriggerEffectState() {
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ return PAD_ERROR_DEVICE_NOT_CONNECTED;
 }
 
 int APS5_VABI scePadVrControllerReadState(int handle, void* state) {
- (void)handle;
- (void)state;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (handle != PAD_HANDLE) return PAD_ERROR_INVALID_HANDLE;
+ if (state == nullptr) return PAD_ERROR_INVALID_ARG;
+ std::memset(state, 0, 0x68);
+ const PadData data = Pad::ReadState();
+ std::uint8_t* bytes = static_cast<std::uint8_t*>(state);
+ std::memcpy(bytes, &data.buttons, sizeof(std::uint32_t));
+ bytes[4] = data.left_stick_x;
+ bytes[5] = data.left_stick_y;
+ bytes[6] = data.right_stick_x;
+ bytes[7] = data.right_stick_y;
+ bytes[0x40] = data.connected ? 1 : 0;
+ return PAD_OK;
 }
 
 int APS5_VABI scePadVrControllerSetTriggerEffect() {
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ return PAD_ERROR_DEVICE_NOT_CONNECTED;
 }
 
 int APS5_VABI scePadVrControllerSetTriggerEffects() {
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ return PAD_ERROR_DEVICE_NOT_CONNECTED;
 }
 
 int APS5_VABI scePadIsRemoteController(int handle, bool* remote) {
