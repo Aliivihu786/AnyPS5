@@ -32,16 +32,6 @@ int APS5_VABI sceFontDestroyGraphicsService() {
     return 0;
 }
 
-int APS5_VABI sceFontGetFontGlyphsOutlineProfile() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceFontGetFontMetrics() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
 int APS5_VABI sceFontGraphicsBeginFrame() {
     NotImplemented_nid_no_patch(__func__);
     return 0;

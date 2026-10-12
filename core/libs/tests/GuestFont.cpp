@@ -73,6 +73,8 @@ int APS5_VABI sceFontGlyphRenderImage(FontGlyph, FontStyleFrame*, void*, FontRen
 int APS5_VABI sceFontGlyphRenderImageHorizontal(FontGlyph, FontStyleFrame*, void*, FontRenderSurface*, float, float, FontGlyphMetrics*, FontRenderOutput*);
 int APS5_VABI sceFontGlyphRenderImageVertical(FontGlyph, FontStyleFrame*, void*, FontRenderSurface*, float, float, FontGlyphMetrics*, FontRenderOutput*);
 void APS5_VABI sceFontRenderSurfaceInit(FontRenderSurface*, void*, int, int, int, int);
+int APS5_VABI sceFontGetFontMetrics(FontHandle, void*);
+int APS5_VABI sceFontGetFontGlyphsOutlineProfile(FontHandle, void*);
 }
 
 static void Check(bool value, int line) {
@@ -334,6 +336,14 @@ int main() {
     Require(sceFontGetFontStyleInformation(font, &dummyStyleInfo) == SCE_FONT_OK);
     Require(sceFontGetFontStyleInformation(nullptr, &dummyStyleInfo) == SCE_FONT_ERROR_INVALID_FONT_HANDLE);
     Require(sceFontGetFontStyleInformation(font, nullptr) == SCE_FONT_ERROR_INVALID_PARAMETER);
+    char dummyMetrics[128] = {};
+    Require(sceFontGetFontMetrics(font, dummyMetrics) == SCE_FONT_OK);
+    Require(sceFontGetFontMetrics(nullptr, dummyMetrics) == SCE_FONT_ERROR_INVALID_FONT_HANDLE);
+    Require(sceFontGetFontMetrics(font, nullptr) == SCE_FONT_ERROR_INVALID_PARAMETER);
+    char dummyProfile[128] = {};
+    Require(sceFontGetFontGlyphsOutlineProfile(font, dummyProfile) == SCE_FONT_OK);
+    Require(sceFontGetFontGlyphsOutlineProfile(nullptr, dummyProfile) == SCE_FONT_ERROR_INVALID_FONT_HANDLE);
+    Require(sceFontGetFontGlyphsOutlineProfile(font, nullptr) == SCE_FONT_ERROR_INVALID_PARAMETER);
     Require(sceFontSupportGlyphs(library) == SCE_FONT_OK);
     Require(sceFontSupportGlyphs(nullptr) == SCE_FONT_ERROR_INVALID_LIBRARY);
     Require(sceFontControl(library, 0, nullptr) == SCE_FONT_OK);

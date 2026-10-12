@@ -576,6 +576,20 @@ int APS5_VABI sceFontUnbindRenderer(FontHandle fontHandle) {
     return rc;
 }
 
+int APS5_VABI sceFontGetFontMetrics(FontHandle fontHandle, void* metrics) {
+    if (!metrics) return SCE_FONT_ERROR_INVALID_PARAMETER;
+    auto* font = GetNativeFont(fontHandle);
+    if (!font || font->magic != HANDLE_MAGIC) return SCE_FONT_ERROR_INVALID_FONT_HANDLE;
+    return SCE_FONT_OK;
+}
+
+int APS5_VABI sceFontGetFontGlyphsOutlineProfile(FontHandle fontHandle, void* profile) {
+    if (!profile) return SCE_FONT_ERROR_INVALID_PARAMETER;
+    auto* font = GetNativeFont(fontHandle);
+    if (!font || font->magic != HANDLE_MAGIC) return SCE_FONT_ERROR_INVALID_FONT_HANDLE;
+    return SCE_FONT_OK;
+}
+
 }
 
 #pragma GCC visibility pop
