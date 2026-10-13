@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <cstdlib>
 #include <deque>
@@ -208,7 +209,7 @@ PadData Pad::ReadState() {
     if (!initialized) throw std::runtime_error("Pad: read before initialization");
     const std::uint64_t now = sceKernelGetProcessTime();
     const auto injected = InjectedInput(now);
-    return BuildData(state, timestamp, now, injected);
+    return BuildData(state, now, now, injected);
 }
 
 int Pad::Read(PadData* data, int num) {
@@ -219,7 +220,7 @@ int Pad::Read(PadData* data, int num) {
     const std::uint64_t now = sceKernelGetProcessTime();
     const auto injected = InjectedInput(now);
     if (queue.empty()) {
-        data[0] = BuildData(state, timestamp, now, injected);
+        data[0] = BuildData(state, now, now, injected);
         return 1;
     }
     int count = 0;
@@ -227,6 +228,13 @@ int Pad::Read(PadData* data, int num) {
         const QueuedInput& entry = queue.front();
         data[count++] = BuildData(entry.input, entry.timestamp, now, injected);
         queue.pop_front();
+    }
+    static const bool logPadRead = std::getenv("ANYPS5_LOG_PAD_INPUT") != nullptr;
+    static std::uint32_t lastReadButtons = 0xFFFFFFFF;
+    if (logPadRead && count > 0 && data[0].buttons != lastReadButtons) {
+        lastReadButtons = data[0].buttons;
+        std::fprintf(stderr, "[ANYPS5_LOG_PAD_INPUT] Pad::Read num=%d count=%d buttons=0x%08X timestamp=%llu\n", num, count, data[0].buttons, static_cast<unsigned long long>(data[0].timestamp));
+        std::fflush(stderr);
     }
     return count;
 }
@@ -352,6 +360,13 @@ extern "C" void PadPublishInput_nid_postfix(const PadInputState& input) {
         state.touch == input.touch && state.deviceKind == input.deviceKind) return;
     state = input;
     timestamp = sceKernelGetProcessTime();
+    static const bool logPadPublish = std::getenv("ANYPS5_LOG_PAD_INPUT") != nullptr;
+    static std::uint32_t lastInputButtons = 0xFFFFFFFF;
+    if (logPadPublish && input.buttons != lastInputButtons) {
+        lastInputButtons = input.buttons;
+        std::fprintf(stderr, "[ANYPS5_LOG_PAD_INPUT] PadPublishInput buttons=0x%08X\n", input.buttons);
+        std::fflush(stderr);
+    }
     if (queue.size() == kQueueCapacity) queue.pop_front();
     queue.push_back({input, timestamp});
 }

@@ -66,6 +66,7 @@ void DisplayWindow::create(std::uint32_t sourceWidth, std::uint32_t sourceHeight
     SDL_SetWindowMinimumSize(window, static_cast<int>(DisplayWindowMinimumWidth), static_cast<int>(DisplayWindowMinimumHeight));
     applyAppIcon(window);
     installSubclass();
+    SDL_RaiseWindow(window);
 }
 
 void DisplayWindow::updateAspectRatio(std::uint32_t sourceWidth, std::uint32_t sourceHeight) {
@@ -136,6 +137,9 @@ void DisplayWindow::installSubclass() {
     require(info.subsystem == SDL_SYSWM_WINDOWS, "unsupported window subsystem");
     const auto attached = SetWindowSubclass(info.info.win.window, reinterpret_cast<SUBCLASSPROC>(&DisplayWindow::windowProc), DisplayWindowSubclassId, reinterpret_cast<DWORD_PTR>(this));
     require(attached != FALSE, "SetWindowSubclass failed");
+    SetForegroundWindow(info.info.win.window);
+    SetActiveWindow(info.info.win.window);
+    SetFocus(info.info.win.window);
 #endif
 }
 

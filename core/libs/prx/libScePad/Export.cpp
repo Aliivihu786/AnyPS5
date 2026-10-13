@@ -1,5 +1,7 @@
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 #include <chrono>
@@ -81,6 +83,15 @@ int APS5_VABI scePadGetControllerInformation(int handle, PadControllerInformatio
  info->connectedCount = 1;
  info->connected = true;
  info->deviceClass = PAD_DEVICE_CLASS_STANDARD;
+ static const bool logPadInfo = std::getenv("ANYPS5_LOG_PAD_INPUT") != nullptr;
+ if (logPadInfo) {
+  static bool logged = false;
+  if (!logged) {
+   logged = true;
+   std::fprintf(stderr, "[ANYPS5_LOG_PAD_INPUT] scePadGetControllerInformation: connected=%d connectedCount=%d deviceClass=%d\n", info->connected ? 1 : 0, info->connectedCount, info->deviceClass);
+   std::fflush(stderr);
+  }
+ }
  return PAD_OK;
 }
 
@@ -139,12 +150,22 @@ int APS5_VABI scePadSetParticularMode(bool mode) {
 }
 
 int APS5_VABI scePadInit_nid_postfix(void) {
+ static const bool logPad = std::getenv("ANYPS5_LOG_PAD_INPUT") != nullptr;
+ if (logPad) {
+  std::fprintf(stderr, "[ANYPS5_LOG_PAD_INPUT] scePadInit called\n");
+  std::fflush(stderr);
+ }
  Pad::Initialize();
  return PAD_OK;
 }
 
 int APS5_VABI scePadOpen_nid_postfix(int userId, int type, int index, const void* param) {
  (void)param;
+ static const bool logPad = std::getenv("ANYPS5_LOG_PAD_INPUT") != nullptr;
+ if (logPad) {
+  std::fprintf(stderr, "[ANYPS5_LOG_PAD_INPUT] scePadOpen userId=%d type=%d index=%d\n", userId, type, index);
+  std::fflush(stderr);
+ }
  if (!ValidPort(userId, type, index)) {
   return PAD_ERROR_INVALID_ARG;
  }
@@ -170,12 +191,31 @@ int APS5_VABI scePadSetFeatureReport() { return PAD_OK; }
 int APS5_VABI scePadOutputReport() { return PAD_OK; }
 
 int APS5_VABI scePadRead_nid_postfix(int handle, PadData* data, int num) {
- if (handle != PAD_HANDLE) return PAD_ERROR_INVALID_HANDLE;
+ static const bool logPadRead = std::getenv("ANYPS5_LOG_PAD_INPUT") != nullptr;
+ static std::uint64_t callCount = 0;
+ ++callCount;
+ if (handle != PAD_HANDLE) {
+  if (logPadRead) {
+   std::fprintf(stderr, "[ANYPS5_LOG_PAD_INPUT] scePadRead invalid handle %d\n", handle);
+   std::fflush(stderr);
+  }
+  return PAD_ERROR_INVALID_HANDLE;
+ }
  if (data == nullptr || num <= 0) APS5_INVALID_ARG_EX;
- return Pad::Read(data, num);
+ int res = Pad::Read(data, num);
+ if (logPadRead && (callCount <= 5 || (callCount % 100) == 0)) {
+  std::fprintf(stderr, "[ANYPS5_LOG_PAD_INPUT] scePadRead #%llu num=%d ret=%d buttons=0x%08X timestamp=%llu\n", static_cast<unsigned long long>(callCount), num, res, data[0].buttons, static_cast<unsigned long long>(data[0].timestamp));
+  std::fflush(stderr);
+ }
+ return res;
 }
 
 int APS5_VABI scePadReadState(int handle, PadData* data) {
+ static const bool logPad = std::getenv("ANYPS5_LOG_PAD_INPUT") != nullptr;
+ if (logPad) {
+  std::fprintf(stderr, "[ANYPS5_LOG_PAD_INPUT] scePadReadState called handle=%d\n", handle);
+  std::fflush(stderr);
+ }
  if (handle != PAD_HANDLE) return PAD_ERROR_INVALID_HANDLE;
  if (data == nullptr) APS5_INVALID_ARG_EX;
 

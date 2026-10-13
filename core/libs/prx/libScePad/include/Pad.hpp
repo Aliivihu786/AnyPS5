@@ -15,7 +15,8 @@ constexpr int PAD_USER_ID_SYSTEM = 0xff;
 constexpr int PAD_HANDLE = 1;
 
 constexpr int PAD_CONNECTION_TYPE_LOCAL = 0;
-constexpr int PAD_DEVICE_CLASS_STANDARD = 0;
+constexpr int PAD_DEVICE_CLASS_UNKNOWN = 0;
+constexpr int PAD_DEVICE_CLASS_STANDARD = 1;
 
 constexpr int PAD_DEVICE_TYPE_NONE = 0;
 constexpr int PAD_DEVICE_TYPE_NAVIGATOR = 1;
