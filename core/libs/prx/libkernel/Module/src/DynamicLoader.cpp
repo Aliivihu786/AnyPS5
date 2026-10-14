@@ -197,8 +197,8 @@ void* APS5_VABI dlopen_nid_postfix(const char* path, int flags) {
                     const auto fallback = RelinkedModulePath_nid_no_patch(ResolvePath_nid_no_patch((std::filesystem::path("sce_module") / resolved.filename()).string().c_str()));
                     module->native = LoadLibraryExW(fallback.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
                 }
-                if (module->native) InitializeDeferredModule(static_cast<HMODULE>(module->native));
             }
+            if (module->native) InitializeDeferredModule(static_cast<HMODULE>(module->native));
         }
         if (!module->native) {
             char message[128];
