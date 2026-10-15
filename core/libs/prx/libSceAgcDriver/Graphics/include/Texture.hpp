@@ -81,7 +81,6 @@ public:
     ~Texture();
     Texture(const Texture&) = delete;
     Texture& operator=(const Texture&) = delete;
-    void Update(TextureDetiler& detiler, std::span<const std::byte> snapshot);
 
     VkImageView View() const;
     VkImageView FirstLayerView() const { return firstLayerView; }
@@ -148,7 +147,6 @@ private:
     VkFormat depthFormat = VK_FORMAT_UNDEFINED;
     VkFormat blockFormat = VK_FORMAT_UNDEFINED;
     std::uint32_t copyWidth = 0, copyHeight = 0, copyLevels = 0, copyLayers = 0, copyElementBytes = 0;
-    GuestTextureResource descriptor{};
 };
 
 VkFormat AttachmentProxyFormat(const Context& context, VkFormat format);

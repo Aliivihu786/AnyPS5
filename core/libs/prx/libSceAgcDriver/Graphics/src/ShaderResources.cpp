@@ -744,17 +744,6 @@ std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const s
                 if (profile) LookupOutcomes::Add(LookupOutcomes::SampledHitSnapshot, start);
                 return it->texture;
             }
-            if (*keys == DccKeys::Uncompressed && it->texture != nullptr && !it->texture->ViewsStorageImage()) {
-                if (Recorder::SnapshotWriteOverlaps(address, bytes)) counters.pendingReads.fetch_add(1, std::memory_order_relaxed);
-                ReadTextureSurface(resource, *keys, it->bytes);
-                it->texture->Update(*context.detiler, it->bytes);
-                it->generation = generation;
-                touchTexture(cache, it);
-                logLookup({it->texture.get(), resource, guestBytes, *keys, generation, nullptr});
-                reportTextureCounters();
-                if (profile) LookupOutcomes::Add(LookupOutcomes::SampledHitSnapshot, start);
-                return it->texture;
-            }
         }
         eraseTexture(cache, it);
         ++cache.counts.stale;
@@ -948,7 +937,7 @@ std::shared_ptr<StorageTexture> cachedStorageTexture(const Context& context, std
     std::vector<std::shared_ptr<StorageTexture>> evicted;
     std::shared_ptr<StorageTexture> texture;
     {
-        std::unique_lock lock(cache.mutex);
+        std::lock_guard lock(cache.mutex);
         if (resource.mipCount > AllocatedLevels(resource)) {
             auto allocated = resource;
             allocated.mipCount = AllocatedLevels(resource);
@@ -966,34 +955,22 @@ std::shared_ptr<StorageTexture> cachedStorageTexture(const Context& context, std
             counters.storageHits.fetch_add(1, std::memory_order_relaxed);
             if (profile) LookupOutcomes::Add(LookupOutcomes::StorageHit, start);
         } else {
-            lock.unlock();
             if (guestBytes == 0) guestBytes = DescribeSurface(resource).guestBytes;
             if (StorageTexture::FlushPending(resource.baseAddress, static_cast<std::size_t>(guestBytes), nullptr, "storage image creation", PublishScope::None) && profile) start = LookupOutcomes::Add(LookupOutcomes::PendingFlush, start);
-            auto newTexture = StorageTexture::Create(context, *context.detiler, resource, mip);
-            lock.lock();
-            auto existing = findStorage(cache, key);
-            if (existing != cache.entries.end()) {
-                existing->texture->Refresh();
-                cache.entries.splice(cache.entries.begin(), cache.entries, existing);
-                texture = existing->texture;
-                counters.storageHits.fetch_add(1, std::memory_order_relaxed);
-                if (profile) LookupOutcomes::Add(LookupOutcomes::StorageHit, start);
-            } else {
-                CachedStorageTexture entry{key, mip, std::move(newTexture)};
-                static const bool keepNew = std::getenv("APS5_NO_KEEP_NEW_STORAGE") == nullptr;
-                if (auto* recorder = Recorder::Active(); keepNew && recorder != nullptr && GuestMemory::GpuMutex().HeldByThisThread() && recorder->Recording()) recorder->Keep(entry.texture);
-                entry.accounted = heldBytes(*entry.texture);
-                const auto budget = storageBudget(context);
-                while (!cache.entries.empty() && cache.bytes + entry.accounted > budget) evicted.push_back(evictStorage(cache, std::prev(cache.entries.end())));
-                cache.bytes += entry.accounted;
-                texture = entry.texture;
-                cache.entries.push_front(std::move(entry));
-                cache.index[key] = cache.entries.begin();
-                cache.byImage[texture.get()] = cache.entries.begin();
-                texture->SetCached(true);
-                counters.storageCreated.fetch_add(1, std::memory_order_relaxed);
-                if (profile) LookupOutcomes::Add(LookupOutcomes::StorageMade, start);
-            }
+            CachedStorageTexture entry{key, mip, StorageTexture::Create(context, *context.detiler, resource, mip)};
+            static const bool keepNew = std::getenv("APS5_NO_KEEP_NEW_STORAGE") == nullptr;
+            if (auto* recorder = Recorder::Active(); keepNew && recorder != nullptr && GuestMemory::GpuMutex().HeldByThisThread() && recorder->Recording()) recorder->Keep(entry.texture);
+            entry.accounted = heldBytes(*entry.texture);
+            const auto budget = storageBudget(context);
+            while (!cache.entries.empty() && cache.bytes + entry.accounted > budget) evicted.push_back(evictStorage(cache, std::prev(cache.entries.end())));
+            cache.bytes += entry.accounted;
+            texture = entry.texture;
+            cache.entries.push_front(std::move(entry));
+            cache.index[key] = cache.entries.begin();
+            cache.byImage[texture.get()] = cache.entries.begin();
+            texture->SetCached(true);
+            counters.storageCreated.fetch_add(1, std::memory_order_relaxed);
+            if (profile) LookupOutcomes::Add(LookupOutcomes::StorageMade, start);
         }
     }
     for (const auto& image : evicted) {
@@ -3517,15 +3494,15 @@ DescriptorCache::Stats DescriptorCache::Counters() const {
 
 std::size_t ShaderResources::addGuestBuffer(std::span<const std::uint32_t> words, const ColorTarget* target, std::uint64_t indexAddress, std::size_t indexBytes, bool written, bool atomic, bool read) {
     Require(words.size() == 4, "buffer descriptor must contain four DWORDs");
-    const ShaderRecompiler::ShaderBufferResource descriptor{{words[0], words[1] & ~0x40000000u, words[2], words[3]}};
+    Require((words[1] & 0x40000000u) == 0, "buffer descriptor has reserved bits set");
+    const ShaderRecompiler::ShaderBufferResource descriptor{{words[0], words[1], words[2], words[3]}};
+    Require(descriptor.Type() == 0u, "buffer descriptor uses an unsupported type");
     const auto address = descriptor.Base48();
     const auto byteSize = descriptor.GetSize();
     if (byteSize == 0 || address == 0) {
         allocations.push_back({0, EmptyBufferBytes, false, nullptr, ShaderRecompiler::DescriptorRole::GuestBuffers, false});
         return allocations.size() - 1;
     }
-    Require(descriptor.Type() == 0u, "buffer descriptor uses an unsupported type");
-
     Require(byteSize <= context.limits.maxStorageBufferRange, "shader buffer exceeds descriptor range limit");
     Require(byteSize <= std::numeric_limits<std::size_t>::max(), "shader buffer size exceeds host address space");
     auto size = static_cast<std::size_t>(byteSize);

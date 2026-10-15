@@ -953,7 +953,7 @@ void materializeTables(const IrResourcePlan& plan, ResourceSnapshot& snapshot) {
             snapshot.buffers.at(i).dwords[3] = 0u;
         }
         const auto decoded = decodeBufferDescriptor(snapshot.buffers.at(i));
-        if (decoded.GetSize() != 0 && decoded.Base48() != 0 && decoded.Type() != 0u) {
+        if (decoded.Type() != 0u) {
             const auto& words = snapshot.buffers.at(i).dwords;
             char detail[64];
             std::snprintf(detail, sizeof(detail), " (buffer %u V# %08x %08x %08x %08x)", i, words[0], words[1], words[2], words[3]);

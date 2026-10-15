@@ -197,7 +197,7 @@ void Driver::waitMemory(std::span<const std::uint32_t> packet, std::uint32_t que
             if (takeLabel(Graphics::Recorder::LookupLabel(awaited, awaitedBytes, received, &refusal), refusal, false, true)) return;
         }
     }
-    const bool lockedEntry = !unlocked || requireMemory || Graphics::Recorder::SnapshotWriteOverlaps(awaited, awaitedBytes);
+    const bool lockedEntry = !unlocked || Graphics::Recorder::SnapshotWriteOverlaps(awaited, awaitedBytes);
     if (!lockedEntry) ++outcomes.entriesUnlocked;
 
     static const bool blockingEntry = std::getenv("APS5_WAIT_LOCK_ENTRY") != nullptr;
@@ -220,7 +220,7 @@ void Driver::waitMemory(std::span<const std::uint32_t> packet, std::uint32_t que
                 if (takeLabel(localDevice->PendingLabel(awaited, awaitedBytes, received, &refusal), refusal, false, false)) return;
             }
 
-            if (!overlapSubmit || requireMemory || localDevice->OpenWriteOverlaps(awaited, awaitedBytes)) localDevice->SubmitRecorded(false);
+            if (!overlapSubmit || localDevice->OpenWriteOverlaps(awaited, awaitedBytes)) localDevice->SubmitRecorded(false);
         }
     }
 
@@ -238,8 +238,7 @@ void Driver::waitMemory(std::span<const std::uint32_t> packet, std::uint32_t que
         const bool changed = generation != seenGeneration || recheck;
         const bool labelDue = labelFlushDue();
         const bool reap = sleeping && (behindCompletion || ((reapAll || queue0Dormant.load(std::memory_order_relaxed)) && completionsPending()));
-        const bool requireSubmit = requireMemory && Graphics::Recorder::RecordedWorkSinceSubmit() != 0;
-        if (!changed && !labelDue && !reap && !requireSubmit) return false;
+        if (!changed && !labelDue && !reap) return false;
 
         if (!changed && !pollTryEach()) {
             const auto now = std::chrono::steady_clock::now();
@@ -292,12 +291,12 @@ void Driver::waitMemory(std::span<const std::uint32_t> packet, std::uint32_t que
                 }
                 pollRefused(refusal);
             }
-            if (requireMemory || localDevice->OpenWriteOverlaps(awaited, awaitedBytes)) {
+            if (localDevice->OpenWriteOverlaps(awaited, awaitedBytes)) {
                 localDevice->SubmitRecorded(false);
                 submitted = true;
             }
         }
-        if ((labelDue || requireSubmit) && !submitted && (Graphics::Recorder::PendingLabelSince().has_value() || Graphics::Recorder::RecordedWorkSinceSubmit() != 0)) {
+        if (labelDue && !submitted && Graphics::Recorder::PendingLabelSince().has_value()) {
             localDevice->SubmitRecorded(false);
             submitted = true;
         }
