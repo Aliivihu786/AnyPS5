@@ -100,36 +100,14 @@ int APS5_VABI sceAudioOut2GetSpeakerArrayAmbisonicsCoefficients(AudioOut2Speaker
 }
 
 int APS5_VABI sceAudioOut2GetSpeakerArrayCoefficients(AudioOut2SpeakerArrayHandle handle, AudioOut2Position pos, float spread, float* coefficients, uint32_t num_coefficients, uint8_t height_aware, float downmix_spread_radius) {
+    (void)handle;
+    (void)pos;
     (void)spread;
+    (void)coefficients;
+    (void)num_coefficients;
     (void)height_aware;
     (void)downmix_spread_radius;
-    const auto& array = Array(handle);
-    if (coefficients == nullptr || num_coefficients != array.numSpeakers) APS5_INVALID_ARG_EX;
-    const double len = std::sqrt(double(pos.x) * pos.x + double(pos.y) * pos.y + double(pos.z) * pos.z);
-    if (len <= 0.0) {
-        const float uniform = 1.0f / std::sqrt(static_cast<float>(array.numSpeakers));
-        for (std::uint32_t i = 0; i < array.numSpeakers; ++i) {
-            coefficients[i] = uniform;
-        }
-        return 0;
-    }
-    const double nx = pos.x / len;
-    const double ny = pos.y / len;
-    const double nz = pos.z / len;
-    double sumSq = 0.0;
-    for (std::uint32_t i = 0; i < array.numSpeakers; ++i) {
-        const auto& dir = array.directions[i];
-        const double dot = nx * dir.x + ny * dir.y + nz * dir.z;
-        const double gain = std::max(0.0, (dot + 1.0) * 0.5);
-        coefficients[i] = static_cast<float>(gain);
-        sumSq += gain * gain;
-    }
-    if (sumSq > 0.0) {
-        const float norm = 1.0f / static_cast<float>(std::sqrt(sumSq));
-        for (std::uint32_t i = 0; i < array.numSpeakers; ++i) {
-            coefficients[i] *= norm;
-        }
-    }
+    NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 

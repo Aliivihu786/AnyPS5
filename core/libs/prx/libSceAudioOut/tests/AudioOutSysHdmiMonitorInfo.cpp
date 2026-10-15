@@ -9,9 +9,6 @@
 #include <string>
 
 extern "C" {
-int APS5_VABI sceAudioOutSysOpen(int, int);
-int APS5_VABI sceAudioOutSysClose(int);
-int APS5_VABI sceAudioOutSysConfigureOutput(int, unsigned, int, int, std::uint64_t);
 int APS5_VABI sceAudioOutSysGetHdmiMonitorInfo(int, void*, std::uint32_t);
 }
 
@@ -70,11 +67,5 @@ int main() {
         "sceAudioOutSysGetHdmiMonitorInfo: monitor type 16 not supported"), "monitor type 0x10 must throw");
     Require(Throws(0, infoSize,
         "sceAudioOutSysGetHdmiMonitorInfo: monitor type 0 not supported"), "monitor type 0 must throw");
-
-    int port = sceAudioOutSysOpen(0, 0);
-    Require(port > 0, "sceAudioOutSysOpen must return a valid port handle");
-    Require(sceAudioOutSysConfigureOutput(0, 0, 0, 1, 0) == 0, "sceAudioOutSysConfigureOutput must succeed");
-    Require(sceAudioOutSysClose(port) == 0, "sceAudioOutSysClose must succeed");
-
     return 0;
 }

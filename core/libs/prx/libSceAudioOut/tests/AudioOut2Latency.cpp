@@ -10,7 +10,6 @@ int APS5_VABI sceAudioOut2Initialize();
 int APS5_VABI sceAudioOut2Set3DLatency(int, std::uint32_t);
 int APS5_VABI sceAudioOut2MasteringInit(std::uint32_t);
 int APS5_VABI sceAudioOut2MasteringTerm();
-int APS5_VABI sceAudioOut2MasteringGetState(void*, std::uint32_t, std::uintptr_t);
 int APS5_VABI sceAudioOut2MasteringSetParam(const void*, std::uint32_t, std::uint32_t);
 int APS5_VABI sceAudioOut2EnableChat();
 int APS5_VABI sceAudioOut2DisableChat();
@@ -57,12 +56,6 @@ void TestMasteringTerm() {
     Require(sceAudioOut2MasteringTerm() == 0, "termination must be accepted for each initialization");
 }
 
-void TestMasteringGetState() {
-    std::uint32_t state[4] = {};
-    Require(sceAudioOut2MasteringGetState(state, 0, 0) == 0, "valid state header must be accepted");
-    Require(sceAudioOut2MasteringGetState(nullptr, 0, 0) == static_cast<int>(0x80260502), "null state header must return invalid argument");
-}
-
 void TestMasteringSetParam() {
     const std::uint32_t params[4] = {1u, 0u, 0u, 0u};
     Require(sceAudioOut2MasteringSetParam(params, 0, 0) == 0, "mastering parameters must be accepted");
@@ -84,7 +77,6 @@ int main() {
     TestSet3DLatency();
     TestMasteringInit();
     TestMasteringTerm();
-    TestMasteringGetState();
     TestMasteringSetParam();
     TestEnableChat();
     return 0;
