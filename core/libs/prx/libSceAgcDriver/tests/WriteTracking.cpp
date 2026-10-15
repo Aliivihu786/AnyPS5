@@ -798,6 +798,27 @@ void CheckCommittedRanges() {
     Require(!UnchangedCommittedSince(first, 0), "an unknown generation was accepted for the committed parts");
 }
 
+void CheckCommittedMemo() {
+    PartlyCommitted range;
+    const auto base = range.Address();
+    range.Commit(0);
+    std::memset(range.Data(), 0x33, Block);
+    Runs runs;
+    const Runs first{{base, base + Block}};
+    const auto collected = CollectCommitted(range, runs);
+    Require(collected != 0 && runs == first, "the committed part of the range was not collected");
+    runs.clear();
+    const auto repeated = CollectCommittedWrites(base, PartlyCommitted::Bytes, runs);
+    Require(repeated == collected && runs == first, "a second collect of one epoch walked the page states again");
+    Require(UnchangedCommittedSince(runs, collected), "the memoized ranges read as changed since their collect");
+    range.Commit(2);
+    runs.clear();
+    const Runs both{{base, base + Block}, {range.Address(2), range.Address(3)}};
+    const auto grown = CollectCommittedWrites(base, PartlyCommitted::Bytes, runs);
+    Require(grown != 0 && runs == both, "a block committed inside the epoch was hidden by the memoized ranges");
+    Require(!UnchangedCommittedSince(runs, collected), "a block committed inside the range reads as unchanged since before the commit");
+}
+
 int main() {
     try {
         if (!WriteWatched()) {
@@ -826,6 +847,7 @@ int main() {
         CheckImportWindowZeroPages();
         CheckUnwatchedImport();
         CheckCommittedRanges();
+        CheckCommittedMemo();
     } catch (const std::exception& error) {
         std::cerr << "write tracking test failed: " << error.what() << "\n";
         return 1;

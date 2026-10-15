@@ -1070,6 +1070,18 @@ struct ThreadCollectMemo {
 };
 thread_local ThreadCollectMemo threadCollectMemo;
 
+struct ThreadCommittedMemo {
+    struct Entry {
+        std::uint64_t begin = 0;
+        std::uint64_t end = 0;
+        std::uint64_t epoch = 0;
+        std::uint64_t unwatched = 0;
+        std::vector<std::pair<std::uint64_t, std::uint64_t>> ranges;
+    };
+    std::array<Entry, 16> entries{};
+    std::size_t next = 0;
+};
+
 bool sharedCollectMemo() {
     static const bool shared = std::getenv("APS5_SHARED_COLLECT_MEMO") != nullptr;
     return shared;
@@ -1359,12 +1371,30 @@ bool UnchangedSinceAll(std::span<const UnchangedQuery> queries) {
 std::uint64_t CollectCommittedWrites(std::uint64_t address, std::size_t bytes, std::vector<std::pair<std::uint64_t, std::uint64_t>>& ranges) {
     ranges.clear();
     if (bytes == 0 || bytes > std::numeric_limits<std::uint64_t>::max() - address || !WriteWatched()) return 0;
-    auto committed = CommittedRanges(address, bytes);
+    const auto epoch = currentCollectEpoch();
+    const auto unwatched = unwatchSerial.load(std::memory_order_acquire);
+    const bool useMemo = collectMemoEnabled();
+    thread_local ThreadCommittedMemo* memoSlot = nullptr;
+    auto& memo = ShaderRecompiler::ThreadOwned(memoSlot);
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> committed;
+    bool described = false;
+    if (useMemo) {
+        for (const auto& entry : memo.entries) {
+            if (entry.epoch == epoch && entry.unwatched == unwatched && entry.begin == address && entry.end == address + bytes) {
+                collectMemoHits.fetch_add(1, std::memory_order_relaxed);
+                committed = entry.ranges;
+                described = true;
+                break;
+            }
+        }
+    }
+    if (!described) committed = CommittedRanges(address, bytes);
     auto generation = TrackerGeneration();
     for (const auto& [begin, end] : committed) {
         generation = CollectWrites(begin, static_cast<std::size_t>(end - begin));
         if (generation == 0) return 0;
     }
+    if (useMemo && !described) memo.entries[memo.next++ % memo.entries.size()] = {address, address + bytes, epoch, unwatched, committed};
     ranges = std::move(committed);
     return generation;
 }
