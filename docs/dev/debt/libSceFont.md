@@ -2,6 +2,7 @@
 
 ### Silent stubs
 
+- [The sceFontGraphics* pipeline](../../../core/libs/prx/libSceFont/src/Graphics.cpp) (libSceFont) validates handles, structure sizes and arguments and returns success without rasterising anything: the font graphics device, service, frame, fill, plot and region objects are tracked as opaque handles with no GPU font pipeline behind them. A title that draws text through this pipeline sees no glyphs. The CPU-side calls such a title still needs (`sceFontRenderCharGlyphImage*`, `sceFontGenerateCharGlyph`) are implemented separately in Render.cpp
 - [sceFontGlyphDefineAttribute](../../../core/libs/prx/libSceFont/src/Render.cpp) (libSceFont) checks the glyph and ignores the attribute and its value, whose meaning is unknown. PPSA01325 sets attribute 0x11 to 0 on a glyph from `sceFontGenerateCharGlyph` that it deletes unused, and draws the character with `sceFontRenderCharGlyphImageHorizontal`
 
 ### Unknown function info
