@@ -440,6 +440,7 @@ private:
         const StorageTexture* source = nullptr;
         bool depth = false;
         bool valid = false;
+        std::vector<std::pair<std::uint64_t, std::uint64_t>> committed{};
     };
     void captureValidation();
     // A surface of this object the fast proof found a foreign image pending over: the element
