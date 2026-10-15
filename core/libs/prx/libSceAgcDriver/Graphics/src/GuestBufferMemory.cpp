@@ -624,7 +624,6 @@ const char* createImport(const Context& context, HostImport& entry, VkResult& fa
     return step;
 }
 
-#ifndef _WIN32
 enum class ImportWatchRequest : std::uint8_t { Probe, Watch, Unwatch };
 
 ImportWatchRequest importWatchRequest() {
@@ -637,15 +636,15 @@ ImportWatchRequest importWatchRequest() {
     }();
     return request;
 }
-#endif
 
 void decideImportWatch(const Context& context, HostImports& state) {
     if (state.watchDevice == context.device) return;
 #ifdef _WIN32
     state.watchDevice = context.device;
-    state.unwatchImports = true;
+    state.unwatchImports = importWatchRequest() != ImportWatchRequest::Watch;
     state.unwatchDmaBufImports = false;
-    if (context.hostImportAlignment != 0 && GuestMemory::WriteWatched()) std::fprintf(stderr, "[write-watch] Windows direct host imports use comparisons; separate shared aliases retain guest write tracking\n");
+    if (context.hostImportAlignment != 0 && GuestMemory::WriteWatched() && !state.unwatchImports) std::fprintf(stderr, "[write-watch] Windows direct host imports stay watched (APS5_WRITE_WATCH_IMPORTS=watch)\n");
+    else if (context.hostImportAlignment != 0 && GuestMemory::WriteWatched()) std::fprintf(stderr, "[write-watch] Windows direct host imports use comparisons; separate shared aliases retain guest write tracking\n");
 #else
     const auto request = importWatchRequest();
     state.watchDevice = context.device;
