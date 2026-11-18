@@ -3754,14 +3754,30 @@ bool tieredHeapHeld(std::uint64_t base, std::uint64_t bytes) {
     return found != state.heaps.end() && found->second.bytes == bytes;
 }
 
+bool windowHoldsData(const Pieces& committed, std::uint64_t begin, std::uint64_t end) {
+    const auto pieces = clipPieces(committed, begin, end);
+    return !pieces.empty() && !GuestNonzeroBlocks(pieces).empty();
+}
+
 bool tieredExclusion(std::uint64_t base, std::uint64_t reserved, const Pieces* committed, Pieces& excluded) {
     excluded.clear();
-    auto& state = TieredHeaps();
-    std::lock_guard lock(state.mutex);
-    const auto found = state.heaps.find(base);
-    if (found == state.heaps.end() || found->second.bytes != reserved) return true;
-    excluded = found->second.imported;
-    return committed == nullptr || outsideVram(found->second, *committed) == found->second.outside;
+    TieredHeap shape;
+    {
+        auto& state = TieredHeaps();
+        std::lock_guard lock(state.mutex);
+        const auto found = state.heaps.find(base);
+        if (found == state.heaps.end() || found->second.bytes != reserved) return true;
+        excluded = found->second.imported;
+        if (committed == nullptr) return true;
+        if (outsideVram(found->second, *committed) != found->second.outside) return false;
+        shape = found->second;
+    }
+    for (std::size_t index = 0; index < shape.tiers.size(); ++index) {
+        if (shape.tiers[index] != WindowTier::Empty) continue;
+        const auto [begin, end] = tierWindow(shape, index);
+        if (windowHoldsData(*committed, begin, end)) return false;
+    }
+    return true;
 }
 
 void clearTieredHeaps(VkDevice device) {
@@ -5497,7 +5513,6 @@ bool GuestBufferMemory::addTieredHeap(const std::shared_ptr<const GuestAllocatio
             found = tiered.heaps.end();
         }
         if (found == tiered.heaps.end()) {
-            if (committed.whole) return false;
             TieredHeap made;
             made.base = range->address;
             made.bytes = range->bytes;
@@ -5533,8 +5548,9 @@ bool GuestBufferMemory::addTieredHeap(const std::shared_ptr<const GuestAllocatio
     for (std::size_t index = 0; index < shape.tiers.size(); ++index) {
         if (shape.tiers[index] != WindowTier::Empty) continue;
         const auto [begin, end] = tierWindow(shape, index);
-        if (clipPieces(committed.ranges, begin, end).empty()) continue;
-        if (boundIn(begin, end) || (vramPlaced <= cap && end - begin <= cap - vramPlaced)) {
+        const bool bound = boundIn(begin, end);
+        if (!bound && !windowHoldsData(committed.ranges, begin, end)) continue;
+        if (bound || (vramPlaced <= cap && end - begin <= cap - vramPlaced)) {
             shape.tiers[index] = WindowTier::Vram;
             vramPlaced += end - begin;
         } else {
@@ -5553,8 +5569,13 @@ bool GuestBufferMemory::addTieredHeap(const std::shared_ptr<const GuestAllocatio
                 const auto from = (first + alignment - 1) / alignment * alignment;
                 const auto to = last / alignment * alignment;
                 if (from >= to) continue;
+                const auto fits = [&](const HostImport* entry) { return entry != nullptr && entry->base <= from && entry->base + entry->bytes >= to; };
                 const auto* entry = importAllocation(context, state, from, lease, ImportRequester::Build, to, false);
-                if (entry == nullptr || entry->base > from || entry->base + entry->bytes < to) {
+                if (!fits(entry)) {
+                    const MirrorsYield yield(state, state.buildFloor);
+                    entry = importAllocation(context, state, from, lease, ImportRequester::Build, to, true);
+                }
+                if (!fits(entry)) {
                     ++refused;
                     continue;
                 }
@@ -5759,11 +5780,6 @@ void GuestBufferMemory::AcquireRegistered() {
         for (const auto& range : lease) {
             if (!range->readable || !range->gpu) continue;
             validate(range->address, range->bytes);
-            if (importable && addTieredHeap(range)) {
-                mirrored = true;
-                lap(timing.mirrorsUs, at);
-                continue;
-            }
             Region region{range->address, range->address + range->bytes, range->writable, {}, nullptr};
             const HostImport* entry = nullptr;
             bool overBudget = false;
@@ -5786,6 +5802,11 @@ void GuestBufferMemory::AcquireRegistered() {
                     coveredBegin = entry->base;
                     coveredEnd = entry->base + entry->bytes;
                 }
+            }
+            if (importable && entry == nullptr && pieces.empty() && addTieredHeap(range)) {
+                mirrored = true;
+                lap(timing.mirrorsUs, at);
+                continue;
             }
             if (importable && mirrorsEnabled() && entry == nullptr && pieces.empty()) {
                 auto& state = Imports();
