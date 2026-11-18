@@ -4548,6 +4548,148 @@ void RunSparseHeapMirrorBudgetTests(const Context& context, const BdaTestAccess&
     std::cout << "a sparse heap whose mirror would pass the heap mirror budget is copied\n";
 }
 
+void RunTieredSparseHeapTests(const Context& context, const BdaTestAccess& access) {
+    constexpr std::size_t block = 65536;
+    constexpr std::size_t window = 2 * block;
+    constexpr std::size_t windows = 16;
+    constexpr std::size_t reserved = windows * window;
+    constexpr std::size_t committed = 6 * window + block;
+#ifdef _WIN32
+    if (!GuestArena::GuestArenaAvailable_nid_postfix() || !GuestArena::GuestArenaWriteWatched_nid_postfix()) {
+        std::cout << "guest arena unavailable or not write-watched: tiered sparse heaps not tested\n";
+        return;
+    }
+    auto* guest = static_cast<std::byte*>(GuestArena::GuestArenaAllocate_nid_postfix(reserved, block));
+    Require(guest != nullptr, "cannot allocate the tiered sparse heap in the guest arena");
+    GuestArena::GuestArenaCommit_nid_postfix(guest, committed, PAGE_READWRITE, block);
+    const auto commit = [&](std::size_t offset, std::size_t bytes) { GuestArena::GuestArenaCommit_nid_postfix(guest + offset, bytes, PAGE_READWRITE, block); };
+#else
+    if (!GuestWriteWatch::GuestWriteWatchAvailable_nid_postfix()) {
+        std::cout << "write watch unavailable: tiered sparse heaps not tested\n";
+        return;
+    }
+    auto* guest = reserveSparse(reserved, committed);
+    GuestWriteWatch::GuestWriteWatchRegister_nid_postfix(guest, reserved);
+    const auto commit = [&](std::size_t offset, std::size_t bytes) { Require(mprotect(guest + offset, bytes, PROT_READ | PROT_WRITE) == 0, "cannot commit more of the tiered sparse heap"); };
+#endif
+    for (std::size_t at = 0; at < committed; at += block) std::memset(guest + at, static_cast<int>(0x11 + at / block), block);
+    const auto base = reinterpret_cast<std::uintptr_t>(guest);
+    auto importing = context;
+    importing.hostImportAlignment = block;
+    const auto live = HostImportLiveBytes();
+    SetHostImportRangeWindow(window);
+    SetTieredHeaps(1);
+    SetTieredHeapMinBytes(window);
+    SetTieredHeapVramBudget(2 * window);
+    const auto registry = [&](bool add) {
+        auto* mutation = GuestAllocations::GuestAllocationsBegin_nid_postfix();
+        if (add) GuestAllocations::GuestAllocationsAdd_nid_postfix(mutation, guest, reserved, true, true, true);
+        else GuestAllocations::GuestAllocationsRemove_nid_postfix(mutation, guest);
+        GuestAllocations::GuestAllocationsEnd_nid_postfix(mutation);
+    };
+    registry(true);
+    const auto before = TieredHeapCounters();
+    const auto served = [&](GuestBufferMemory& leased, std::size_t through, std::size_t importedFrom, std::size_t importedTo) {
+        const auto end = base + through;
+        auto covered = base;
+        for (const auto& entry : leased.AddressRanges()) {
+            if (entry.end <= base || entry.begin >= end) continue;
+            Require(entry.begin == covered, "a tiered sparse heap's BDA ranges have a gap or overlap");
+            const auto* imported = ExistingHostImportFor(importing, entry.begin, static_cast<std::size_t>(entry.end - entry.begin));
+            const bool direct = imported != nullptr && entry.deviceAddress == imported->address + entry.begin - imported->base;
+            if (entry.begin >= base + importedFrom && entry.end <= base + importedTo) {
+                Require(direct, "a committed tiered sparse heap window past the VRAM budget is not served by its host import");
+                Require((entry.permissions & ShaderRecompiler::BdaAbi::Write) != 0u, "an imported window of a writable tiered heap is not writable through the BDA table");
+            }
+            if (entry.end <= base + importedFrom) Require(!direct, "a tiered sparse heap window inside the VRAM budget is served by a host import");
+            if (!direct) {
+                std::uint32_t adjustment = 0;
+                const auto length = static_cast<std::size_t>(std::min<std::uint64_t>(entry.end, end) - entry.begin);
+                const auto view = leased.Descriptor(entry.begin, length, adjustment);
+                const auto data = access.bytes(view.buffer).subspan(view.offset + adjustment);
+                Require(data[0] == guest[entry.begin - base] && data[length - 1] == guest[entry.begin - base + length - 1], "a tiered sparse heap window served by its mirror lost its first or last bytes");
+            }
+            covered = entry.end;
+        }
+        Require(covered >= end, "a tiered sparse heap does not cover its committed pages");
+    };
+    {
+        GuestBufferMemory leased(importing);
+        leased.AcquireRegistered();
+        leased.AddWritable(base + 16, 32);
+        leased.Upload(true);
+        const auto counts = TieredHeapCounters();
+        Require(counts.heaps == before.heaps + 1 && counts.vramWindows == before.vramWindows + 2 && counts.ramWindows == before.ramWindows + 5, "a tiered sparse heap did not keep two windows in VRAM and import the five committed windows past the budget");
+        Require(counts.importedBytes == before.importedBytes + committed - 2 * window, "a tiered sparse heap imported other than its committed pages past the VRAM budget");
+        Require(HostImportLiveBytes() <= live + committed - 2 * window, "a tiered sparse heap imported more than its committed pages past the VRAM budget");
+        served(leased, committed, 2 * window, committed);
+        std::uint32_t adjustment = 0;
+        const auto view = leased.Descriptor(base + 16, 32, adjustment);
+        access.bytes(view.buffer)[view.offset + adjustment] = std::byte{0x7e};
+        leased.WriteBack();
+    }
+    Require(guest[16] == std::byte{0x7e}, "a store to a tiered sparse heap's VRAM window was not written back");
+    commit(committed, window + block);
+    std::memset(guest + committed, 0x66, window + block);
+    std::memset(guest + 3 * window + 8, 0x5d, 8);
+    {
+        GuestBufferMemory leased(importing);
+        leased.AcquireRegistered();
+        leased.Upload(true);
+        const auto counts = TieredHeapCounters();
+        Require(counts.vramWindows == before.vramWindows + 2 && counts.ramWindows == before.ramWindows + 6, "a window committed past the VRAM budget was not imported");
+        served(leased, committed + window + block, 2 * window, 6 * window);
+        Require(guest[3 * window + 8] == std::byte{0x5d}, "a CPU store into an imported window was lost");
+        leased.WriteBack();
+    }
+    SetHostImportBudget(live + window);
+    commit(8 * window, window);
+    std::memset(guest + 8 * window, 0x44, window);
+    {
+        GuestBufferMemory leased(importing);
+        leased.AcquireRegistered();
+        leased.Upload(true);
+        const auto counts = TieredHeapCounters();
+        Require(counts.fallbacks > before.fallbacks, "a window whose import the budget refused was not counted");
+        auto covered = base;
+        for (const auto& entry : leased.AddressRanges()) {
+            if (entry.end <= base || entry.begin >= base + 9 * window) continue;
+            Require(entry.begin == covered, "a tiered sparse heap with refused imports has a gap or overlap in its BDA ranges");
+            covered = entry.end;
+        }
+        Require(covered >= base + 9 * window, "a window whose import the budget refused is not served by the heap mirror");
+        std::uint32_t adjustment = 0;
+        const auto view = leased.Descriptor(base + 8 * window, window, adjustment);
+        const auto data = access.bytes(view.buffer).subspan(view.offset + adjustment);
+        Require(data[0] == std::byte{0x44} && data[window - 1] == std::byte{0x44}, "a window whose import the budget refused lost its bytes in the heap mirror");
+        leased.WriteBack();
+    }
+    SetHostImportBudget(0);
+    SetTieredHeapVramBudget(0);
+    SetTieredHeapMinBytes(0);
+    SetTieredHeaps(-1);
+    SetHostImportRangeWindow(std::uint64_t{64} << 20u);
+    registry(false);
+    {
+        GuestBufferMemory leased(importing);
+        leased.AcquireRegistered();
+        leased.Upload(true);
+        leased.WriteBack();
+    }
+    ClearImageMirrors(importing.device);
+    ClearHostImports(importing.device);
+    ClearSnapshotCopies(importing.device);
+    ClearUploadCopies(importing.device);
+#ifdef _WIN32
+    GuestArena::GuestArenaReset_nid_postfix(guest, reserved);
+    GuestArena::GuestArenaRelease_nid_postfix(guest, reserved);
+#else
+    GuestWriteWatch::GuestWriteWatchUnregister_nid_postfix(guest, reserved);
+    releaseSparse(guest, reserved);
+#endif
+    std::cout << "a tiered sparse heap keeps windows within the VRAM budget in its mirror, imports committed windows past it, and mirrors a window whose import the budget refuses\n";
+}
+
 void RunHeapMirrorReferenceSizeTests(const Context& context, const BdaTestAccess& access) {
     constexpr std::size_t block = 65536;
     constexpr std::size_t heapBytes = 4 * block;

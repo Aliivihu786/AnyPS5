@@ -300,6 +300,17 @@ struct MirrorStats {
     std::uint64_t rangeMirrors = 0;
 };
 MirrorStats MirrorCounters();
+struct TieredHeapStats {
+    std::uint64_t heaps = 0;
+    std::uint64_t vramWindows = 0;
+    std::uint64_t ramWindows = 0;
+    std::uint64_t importedBytes = 0;
+    std::uint64_t fallbacks = 0;
+};
+TieredHeapStats TieredHeapCounters();
+void SetTieredHeaps(int enabled);
+void SetTieredHeapVramBudget(std::uint64_t bytes);
+void SetTieredHeapMinBytes(std::uint64_t bytes);
 std::uint64_t SnapshotMismatches();
 struct HeapMirrorHold {
     std::uint64_t mirrors = 0;
@@ -582,6 +593,7 @@ private:
     static bool servesView(const Region& region, std::uint64_t view);
     static bool sparseHeapCandidate(const Region& region);
     bool bindSparseMirror(Region& region, const GuestAllocations::Lease& lease);
+    bool addTieredHeap(const std::shared_ptr<const GuestAllocations::Range>& range);
     // Gives a region a buffer of its own with its bytes (guest memory for host-backed and writable
     // ranges, plus the write-back's reference copy for a range a descriptor writes; else its snapshot).
     void copyRegion(Region& region, bool addressable);

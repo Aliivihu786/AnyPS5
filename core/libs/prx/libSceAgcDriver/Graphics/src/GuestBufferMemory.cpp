@@ -3659,8 +3659,123 @@ Pieces clipPieces(const Pieces& pieces, std::uint64_t begin, std::uint64_t end) 
     return result;
 }
 
-bool refreshSparseMirror(ImageMirror& mirror, std::vector<RefreshBlock>& blocks) {
+Pieces subtractPieces(const Pieces& pieces, const Pieces& removed) {
+    if (removed.empty()) return pieces;
+    Pieces result;
+    std::size_t at = 0;
+    for (const auto& [first, last] : pieces) {
+        while (at < removed.size() && removed[at].second <= first) ++at;
+        auto cursor = first;
+        for (auto next = at; next < removed.size() && removed[next].first < last; ++next) {
+            if (removed[next].first > cursor) result.emplace_back(cursor, removed[next].first);
+            cursor = std::max(cursor, removed[next].second);
+        }
+        if (cursor < last) result.emplace_back(cursor, last);
+    }
+    return result;
+}
+
+std::atomic<int> testTieredHeaps{-1};
+std::atomic<std::uint64_t> testTieredVramBytes{0};
+std::atomic<std::uint64_t> testTieredMinBytes{0};
+
+bool tieredHeapsEnabled() {
+    if (const auto test = testTieredHeaps.load(std::memory_order_acquire); test >= 0) return test != 0;
+    static const bool enabled = [] {
+        const char* value = std::getenv("APS5_TIERED_HEAPS");
+        return value != nullptr && *value != '\0' && std::string_view(value) != "0";
+    }();
+    return enabled;
+}
+
+std::uint64_t tieredHeapMinBytes() {
+    if (const auto test = testTieredMinBytes.load(std::memory_order_acquire); test != 0) return test;
+    static const std::uint64_t bytes = [] {
+        const char* value = std::getenv("APS5_TIERED_HEAP_MIN_MIB");
+        return (value ? std::strtoull(value, nullptr, 10) : 512ull) << 20u;
+    }();
+    return bytes;
+}
+
+std::uint64_t tieredHeapVramSetting() {
+    if (const auto test = testTieredVramBytes.load(std::memory_order_acquire); test != 0) return test;
+    static const std::uint64_t bytes = [] {
+        const char* value = std::getenv("APS5_TIERED_HEAP_VRAM_MIB");
+        return value ? std::strtoull(value, nullptr, 10) << 20u : 0ull;
+    }();
+    return bytes;
+}
+
+enum class WindowTier : std::uint8_t { Empty, Vram, Ram };
+
+struct TieredHeap {
+    std::uint64_t base = 0;
+    std::uint64_t bytes = 0;
+    std::uint64_t window = 0;
+    std::vector<WindowTier> tiers;
+    Pieces imported;
+    Pieces outside;
+    std::uint64_t fallbacks = 0;
+};
+
+struct TieredHeapState {
+    std::mutex mutex;
+    VkDevice device = VK_NULL_HANDLE;
+    std::map<std::uint64_t, TieredHeap> heaps;
+    std::chrono::steady_clock::time_point lastReport{};
+};
+
+TieredHeapState& TieredHeaps() {
+    static TieredHeapState state;
+    return state;
+}
+
+std::pair<std::uint64_t, std::uint64_t> tierWindow(const TieredHeap& heap, std::size_t index) {
+    const auto begin = heap.base + index * heap.window;
+    const auto end = index + 1 == heap.tiers.size() ? heap.base + heap.bytes : begin + heap.window;
+    return {begin, end};
+}
+
+Pieces outsideVram(const TieredHeap& heap, const Pieces& committed) {
+    Pieces result;
+    for (std::size_t index = 0; index < heap.tiers.size(); ++index) {
+        if (heap.tiers[index] == WindowTier::Vram) continue;
+        const auto [begin, end] = tierWindow(heap, index);
+        const auto part = clipPieces(committed, begin, end);
+        result.insert(result.end(), part.begin(), part.end());
+    }
+    return result;
+}
+
+bool tieredHeapHeld(std::uint64_t base, std::uint64_t bytes) {
+    auto& state = TieredHeaps();
+    std::lock_guard lock(state.mutex);
+    const auto found = state.heaps.find(base);
+    return found != state.heaps.end() && found->second.bytes == bytes;
+}
+
+bool tieredExclusion(std::uint64_t base, std::uint64_t reserved, const Pieces* committed, Pieces& excluded) {
+    excluded.clear();
+    auto& state = TieredHeaps();
+    std::lock_guard lock(state.mutex);
+    const auto found = state.heaps.find(base);
+    if (found == state.heaps.end() || found->second.bytes != reserved) return true;
+    excluded = found->second.imported;
+    return committed == nullptr || outsideVram(found->second, *committed) == found->second.outside;
+}
+
+void clearTieredHeaps(VkDevice device) {
+    auto& state = TieredHeaps();
+    std::lock_guard lock(state.mutex);
+    if (state.device != device) return;
+    state.heaps.clear();
+}
+
+bool refreshSparseMirror(ImageMirror& mirror, std::vector<RefreshBlock>& blocks, bool placed = false) {
     auto pieces = GuestMemory::DescribeCommitted(mirror.base, static_cast<std::size_t>(mirror.reserved)).ranges;
+    Pieces excluded;
+    if (mirror.heap && !mirror.joinedHeap && !tieredExclusion(mirror.base, mirror.reserved, placed ? &pieces : nullptr, excluded)) return false;
+    pieces = subtractPieces(pieces, excluded);
     if (!pieces.empty() && pieces.back().second > mirror.base + mirror.bytes) return false;
     syncRange(mirror.base, mirror.bytes);
     const auto generation = collectPieces(pieces);
@@ -3680,7 +3795,7 @@ void planSpaceMirrors(GuestBufferMemory::AddressSpace& space) {
         }
         auto* mirror = region.mirror.get();
         if (mirror->sparse) {
-            space.sparseMirrors.push_back(mirror);
+            if (std::find(space.sparseMirrors.begin(), space.sparseMirrors.end(), mirror) == space.sparseMirrors.end()) space.sparseMirrors.push_back(mirror);
             continue;
         }
         if (space.heapRuns.empty() || mirror->base != space.heapMirrors.back()->base + space.heapMirrors.back()->bytes) space.heapRuns.push_back({mirror->base, 0, space.heapMirrors.size(), 0});
@@ -3760,12 +3875,18 @@ std::shared_ptr<ImageMirror> acquireMirror(const Context& context, const std::sh
         if (refreshSparseMirror(*mirror, blocks)) return mirror;
     }
     Pieces pieces;
-    if (!GuestMemory::Accessible(reinterpret_cast<const void*>(selected.address), selected.bytes, range->writable && !heap)) {
+    const bool tiered = heap && bytes == 0 && !joinedHeap && tieredHeapHeld(selected.address, selected.bytes);
+    if (tiered || !GuestMemory::Accessible(reinterpret_cast<const void*>(selected.address), selected.bytes, range->writable && !heap)) {
         if (!heap || !sparseMirrorsEnabled()) return nullptr;
         pieces = GuestMemory::DescribeCommitted(selected.address, selected.bytes).ranges;
         if (pieces.empty()) return nullptr;
     }
     const bool sparse = !pieces.empty();
+    if (tiered) {
+        Pieces excluded;
+        tieredExclusion(selected.address, selected.bytes, nullptr, excluded);
+        pieces = subtractPieces(pieces, excluded);
+    }
     mirror = std::make_shared<ImageMirror>();
     mirror->base = selected.address;
     mirror->bytes = sparse ? sparseExtent(selected.address, selected.bytes, pieces) : selected.bytes;
@@ -4417,6 +4538,7 @@ void ClearSnapshotCopies(VkDevice device) {
 }
 
 void ClearImageMirrors(VkDevice device) {
+    clearTieredHeaps(device);
     auto space = Spaces().current.load();
     if (space != nullptr && space->device == device) {
         Spaces().current.compare_exchange_strong(space, std::shared_ptr<const GuestBufferMemory::AddressSpace>{});
@@ -5281,6 +5403,208 @@ void stampSpaceUse(HostImports& state, const GuestBufferMemory::AddressSpace& sp
     }
 }
 
+std::uint64_t tieredVramCap(const Context& context, const std::vector<std::uint64_t>& tieredBases) {
+    if (const auto set = tieredHeapVramSetting(); set != 0) return set;
+    std::uint64_t mirrorHeld = 0;
+    std::uint64_t otherMirrors = 0;
+    {
+        auto& state = Mirrors();
+        std::lock_guard lock(state.mutex);
+        mirrorHeld = state.heapBytes;
+        for (const auto& [base, mirror] : state.entries) {
+            if (mirror->heap && mirror->listed && !std::binary_search(tieredBases.begin(), tieredBases.end(), base)) otherMirrors += mirror->accounted;
+        }
+    }
+    const auto type = context.MemoryType(~0u, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (type >= context.memory.memoryTypeCount) return std::numeric_limits<std::uint64_t>::max();
+    const auto report = context.ReportedHeap(context.memory.memoryTypes[type].heapIndex);
+    if (report.budget == 0) return std::numeric_limits<std::uint64_t>::max();
+    const auto limit = report.budget - report.budget / 8u;
+    const auto others = report.usage - std::min<std::uint64_t>(report.usage, mirrorHeld) + otherMirrors;
+    return limit - std::min<std::uint64_t>(limit, others);
+}
+
+void reportTieredHeaps() {
+    static const bool enabled = std::getenv("APS5_TRACE_MEMORY_BUDGET") != nullptr || std::getenv("APS5_PROFILE_DRAW") != nullptr;
+    if (!enabled) return;
+    auto& state = TieredHeaps();
+    std::lock_guard lock(state.mutex);
+    const auto now = std::chrono::steady_clock::now();
+    if (state.heaps.empty() || now - state.lastReport < std::chrono::seconds(10)) return;
+    state.lastReport = now;
+    for (const auto& [base, heap] : state.heaps) {
+        std::size_t vram = 0;
+        std::size_t ram = 0;
+        for (const auto tier : heap.tiers) {
+            vram += tier == WindowTier::Vram;
+            ram += tier == WindowTier::Ram;
+        }
+        std::uint64_t imported = 0;
+        for (const auto& [first, last] : heap.imported) imported += last - first;
+        std::fprintf(stderr, "[tiered-heap] 0x%llx+0x%llx: %zu windows of %llu MiB, %zu in VRAM, %zu in imported RAM (%llu MiB imported), %zu empty, %llu imports refused\n", static_cast<unsigned long long>(base), static_cast<unsigned long long>(heap.bytes), heap.tiers.size(), static_cast<unsigned long long>(heap.window >> 20u), vram, ram, static_cast<unsigned long long>(imported >> 20u), heap.tiers.size() - vram - ram, static_cast<unsigned long long>(heap.fallbacks));
+    }
+}
+
+}
+
+TieredHeapStats TieredHeapCounters() {
+    auto& state = TieredHeaps();
+    std::lock_guard lock(state.mutex);
+    TieredHeapStats stats;
+    stats.heaps = state.heaps.size();
+    for (const auto& [base, heap] : state.heaps) {
+        for (const auto tier : heap.tiers) {
+            stats.vramWindows += tier == WindowTier::Vram;
+            stats.ramWindows += tier == WindowTier::Ram;
+        }
+        for (const auto& [first, last] : heap.imported) stats.importedBytes += last - first;
+        stats.fallbacks += heap.fallbacks;
+    }
+    return stats;
+}
+
+void SetTieredHeaps(int enabled) {
+    testTieredHeaps.store(enabled, std::memory_order_release);
+}
+
+void SetTieredHeapVramBudget(std::uint64_t bytes) {
+    testTieredVramBytes.store(bytes, std::memory_order_release);
+}
+
+void SetTieredHeapMinBytes(std::uint64_t bytes) {
+    testTieredMinBytes.store(bytes, std::memory_order_release);
+}
+
+bool GuestBufferMemory::addTieredHeap(const std::shared_ptr<const GuestAllocations::Range>& range) {
+    const auto window = rangeImportWindow.load(std::memory_order_relaxed);
+    const auto alignment = context.hostImportAlignment;
+    if (!tieredHeapsEnabled() || buildingBlocks == nullptr || !range->releasable || !mirrorsEnabled() || !sparseMirrorsEnabled()) return false;
+    if (window == 0 || alignment == 0 || window % alignment != 0 || range->address % alignment != 0 || range->bytes < std::max(tieredHeapMinBytes(), 2 * window) || WasEvicted(range->address)) return false;
+    const auto committed = GuestMemory::DescribeCommitted(range->address, range->bytes);
+    auto& tiered = TieredHeaps();
+    TieredHeap shape;
+    std::vector<std::uint64_t> tieredBases;
+    std::uint64_t vramPlaced = 0;
+    {
+        std::lock_guard lock(tiered.mutex);
+        if (tiered.device != context.device) {
+            tiered.heaps.clear();
+            tiered.device = context.device;
+        }
+        auto found = tiered.heaps.find(range->address);
+        if (found != tiered.heaps.end() && (found->second.bytes != range->bytes || found->second.window != window)) {
+            tiered.heaps.erase(found);
+            found = tiered.heaps.end();
+        }
+        if (found == tiered.heaps.end()) {
+            if (committed.whole) return false;
+            TieredHeap made;
+            made.base = range->address;
+            made.bytes = range->bytes;
+            made.window = window;
+            made.tiers.assign(static_cast<std::size_t>(range->bytes / window), WindowTier::Empty);
+            found = tiered.heaps.emplace(range->address, std::move(made)).first;
+        }
+        shape = found->second;
+        for (const auto& [base, heap] : tiered.heaps) {
+            tieredBases.push_back(base);
+            for (std::size_t index = 0; index < heap.tiers.size(); ++index) {
+                if (heap.tiers[index] != WindowTier::Vram) continue;
+                const auto [begin, end] = tierWindow(heap, index);
+                vramPlaced += end - begin;
+            }
+        }
+    }
+    std::shared_ptr<ImageMirror> existing;
+    {
+        auto& state = Mirrors();
+        std::lock_guard lock(state.mutex);
+        if (const auto found = state.entries.find(range->address); found != state.entries.end() && found->second->heap && !found->second->joinedHeap) existing = found->second;
+    }
+    const auto boundIn = [&](std::uint64_t begin, std::uint64_t end) {
+        if (existing == nullptr || existing->resident == nullptr) return false;
+        end = std::min(end, existing->base + existing->bytes);
+        begin = std::max(begin, existing->base);
+        if (begin >= end) return false;
+        const GuestRuns runs{{begin, end}};
+        return existing->resident->UnboundBytes(runs) < blockBytes(runs);
+    };
+    const auto cap = tieredVramCap(context, tieredBases);
+    for (std::size_t index = 0; index < shape.tiers.size(); ++index) {
+        if (shape.tiers[index] != WindowTier::Empty) continue;
+        const auto [begin, end] = tierWindow(shape, index);
+        if (clipPieces(committed.ranges, begin, end).empty()) continue;
+        if (boundIn(begin, end) || (vramPlaced <= cap && end - begin <= cap - vramPlaced)) {
+            shape.tiers[index] = WindowTier::Vram;
+            vramPlaced += end - begin;
+        } else {
+            shape.tiers[index] = WindowTier::Ram;
+        }
+    }
+    std::vector<ImportPiece> pieces;
+    std::uint64_t refused = 0;
+    {
+        auto& state = Imports();
+        std::lock_guard lock(state.mutex);
+        for (std::size_t index = 0; index < shape.tiers.size(); ++index) {
+            if (shape.tiers[index] != WindowTier::Ram) continue;
+            const auto [begin, end] = tierWindow(shape, index);
+            for (const auto& [first, last] : clipPieces(committed.ranges, begin, end)) {
+                const auto from = (first + alignment - 1) / alignment * alignment;
+                const auto to = last / alignment * alignment;
+                if (from >= to) continue;
+                const auto* entry = importAllocation(context, state, from, lease, ImportRequester::Build, to, false);
+                if (entry == nullptr || entry->base > from || entry->base + entry->bytes < to) {
+                    ++refused;
+                    continue;
+                }
+                pieces.push_back({from, to, entry});
+            }
+        }
+    }
+    {
+        std::lock_guard lock(tiered.mutex);
+        auto found = tiered.heaps.find(range->address);
+        if (found == tiered.heaps.end() || found->second.bytes != shape.bytes || found->second.window != shape.window) return false;
+        auto& heap = found->second;
+        for (std::size_t index = 0; index < heap.tiers.size(); ++index) {
+            if (heap.tiers[index] == WindowTier::Empty) heap.tiers[index] = shape.tiers[index];
+        }
+        heap.imported.clear();
+        for (const auto& piece : pieces) heap.imported.emplace_back(piece.begin, piece.end);
+        heap.outside = outsideVram(heap, committed.ranges);
+        heap.fallbacks += refused;
+    }
+    auto mirror = acquireMirror(context, range, *buildingBlocks, true);
+    if (mirror == nullptr) {
+        std::lock_guard lock(tiered.mutex);
+        tiered.heaps.erase(range->address);
+        return false;
+    }
+    const auto mirrorEnd = mirror->base + mirror->bytes;
+    const auto addMirrored = [&](std::uint64_t begin, std::uint64_t end) {
+        begin = std::max(begin, mirror->base);
+        end = std::min(end, mirrorEnd);
+        if (begin >= end) return;
+        Region part{begin, end, range->writable, {}, nullptr};
+        part.mirror = mirror;
+        if (mirror->sparse) {
+            part.sparse = true;
+            part.backed = clipPieces(mirror->committed, begin, end);
+        }
+        regions.push_back(std::move(part));
+    };
+    auto cursor = range->address;
+    for (const auto& piece : pieces) {
+        addMirrored(cursor, piece.begin);
+        Region part{piece.begin, piece.end, range->writable, {}, nullptr};
+        part.hostBacked = true;
+        part.direct = piece.entry;
+        regions.push_back(std::move(part));
+        cursor = piece.end;
+    }
+    addMirrored(cursor, range->address + range->bytes);
+    return true;
 }
 
 void GuestBufferMemory::AcquireRegistered() {
@@ -5294,6 +5618,7 @@ void GuestBufferMemory::AcquireRegistered() {
     const BuildingScope buildingScope(this);
     Require(!uploaded && regions.empty() && lease.empty() && space == nullptr, "guest allocation lease must precede resource registration");
     ensurePinWaiter();
+    reportTieredHeaps();
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
     auto& timing = ThreadAddressTiming();
     const auto lap = [&](double& into, std::chrono::steady_clock::time_point& from) {
@@ -5369,7 +5694,7 @@ void GuestBufferMemory::AcquireRegistered() {
         }
         if (hit) {
             for (auto* mirror : current->sparseMirrors) {
-                if (refreshSparseMirror(*mirror, blocks)) continue;
+                if (refreshSparseMirror(*mirror, blocks, true)) continue;
                 hit = false;
                 blocks.clear();
                 spaces.current.compare_exchange_strong(current, std::shared_ptr<const AddressSpace>{});
@@ -5434,6 +5759,11 @@ void GuestBufferMemory::AcquireRegistered() {
         for (const auto& range : lease) {
             if (!range->readable || !range->gpu) continue;
             validate(range->address, range->bytes);
+            if (importable && addTieredHeap(range)) {
+                mirrored = true;
+                lap(timing.mirrorsUs, at);
+                continue;
+            }
             Region region{range->address, range->address + range->bytes, range->writable, {}, nullptr};
             const HostImport* entry = nullptr;
             bool overBudget = false;
