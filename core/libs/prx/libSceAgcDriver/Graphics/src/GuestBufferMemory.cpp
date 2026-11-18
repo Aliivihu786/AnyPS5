@@ -3706,16 +3706,58 @@ std::uint64_t tieredHeapVramSetting() {
     return bytes;
 }
 
+std::atomic<int> testTieredMoves{-1};
+std::atomic<std::uint64_t> testTieredMoveFrames{0};
+std::atomic<std::uint64_t> testTieredReportBudget{0};
+std::atomic<std::uint64_t> testTieredReportUsage{0};
+
+bool tieredMovesEnabled() {
+    if (const auto test = testTieredMoves.load(std::memory_order_acquire); test >= 0) return test != 0;
+    static const bool enabled = [] {
+        const char* value = std::getenv("APS5_TIERED_HEAP_MOVES");
+        return value != nullptr && *value != '\0' && std::string_view(value) != "0";
+    }();
+    return enabled;
+}
+
+std::uint64_t tieredMoveFrames() {
+    if (const auto test = testTieredMoveFrames.load(std::memory_order_acquire); test != 0) return test;
+    static const std::uint64_t frames = [] {
+        const char* value = std::getenv("APS5_TIERED_HEAP_MOVE_FRAMES");
+        const auto parsed = value ? std::strtoull(value, nullptr, 10) : 8ull;
+        return parsed == 0 ? 1ull : parsed;
+    }();
+    return frames;
+}
+
+constexpr std::uint64_t TieredMoveCooldownPlans = 16;
+constexpr std::uint64_t TieredActivePlans = 8;
+
 enum class WindowTier : std::uint8_t { Empty, Vram, Ram };
+
+struct PendingUnbind {
+    std::weak_ptr<const void> placement;
+    std::weak_ptr<ImageMirror> mirror;
+    Pieces runs;
+};
 
 struct TieredHeap {
     std::uint64_t base = 0;
     std::uint64_t bytes = 0;
     std::uint64_t window = 0;
     std::vector<WindowTier> tiers;
+    std::vector<std::uint64_t> stamps;
+    std::vector<std::uint64_t> active;
+    std::vector<std::uint64_t> moved;
+    std::vector<std::pair<std::size_t, WindowTier>> moves;
     Pieces imported;
     Pieces outside;
+    std::shared_ptr<const void> placement = std::make_shared<int>(0);
+    std::vector<PendingUnbind> unbinds;
     std::uint64_t fallbacks = 0;
+    std::uint64_t demotions = 0;
+    std::uint64_t promotions = 0;
+    std::uint64_t unboundBytes = 0;
 };
 
 struct TieredHeapState {
@@ -3723,6 +3765,8 @@ struct TieredHeapState {
     VkDevice device = VK_NULL_HANDLE;
     std::map<std::uint64_t, TieredHeap> heaps;
     std::chrono::steady_clock::time_point lastReport{};
+    std::uint64_t plannedFrame = 0;
+    std::uint64_t plans = 0;
 };
 
 TieredHeapState& TieredHeaps() {
@@ -3769,7 +3813,7 @@ bool tieredExclusion(std::uint64_t base, std::uint64_t reserved, const Pieces* c
         if (found == state.heaps.end() || found->second.bytes != reserved) return true;
         excluded = found->second.imported;
         if (committed == nullptr) return true;
-        if (outsideVram(found->second, *committed) != found->second.outside) return false;
+        if (!found->second.moves.empty() || outsideVram(found->second, *committed) != found->second.outside) return false;
         shape = found->second;
     }
     for (std::size_t index = 0; index < shape.tiers.size(); ++index) {
@@ -5419,6 +5463,17 @@ void stampSpaceUse(HostImports& state, const GuestBufferMemory::AddressSpace& sp
     }
 }
 
+std::pair<std::uint64_t, std::uint64_t> tieredDeviceReport(const Context& context) {
+    if (const auto budget = testTieredReportBudget.load(std::memory_order_acquire); budget != 0) return {budget, testTieredReportUsage.load(std::memory_order_acquire)};
+    for (std::uint32_t type = 0; type < context.memory.memoryTypeCount; ++type) {
+        const auto heap = context.memory.memoryTypes[type].heapIndex;
+        if ((context.memory.memoryTypes[type].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) == 0 || heap >= context.memory.memoryHeapCount || (context.memory.memoryHeaps[heap].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) == 0) continue;
+        const auto report = context.ReportedHeap(heap);
+        return {report.budget, report.usage};
+    }
+    return {0, 0};
+}
+
 std::uint64_t tieredVramCap(const Context& context, const std::vector<std::uint64_t>& tieredBases) {
     if (const auto set = tieredHeapVramSetting(); set != 0) return set;
     std::uint64_t mirrorHeld = 0;
@@ -5431,12 +5486,10 @@ std::uint64_t tieredVramCap(const Context& context, const std::vector<std::uint6
             if (mirror->heap && mirror->listed && !std::binary_search(tieredBases.begin(), tieredBases.end(), base)) otherMirrors += mirror->accounted;
         }
     }
-    const auto type = context.MemoryType(~0u, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    if (type >= context.memory.memoryTypeCount) return std::numeric_limits<std::uint64_t>::max();
-    const auto report = context.ReportedHeap(context.memory.memoryTypes[type].heapIndex);
-    if (report.budget == 0) return std::numeric_limits<std::uint64_t>::max();
-    const auto limit = report.budget - report.budget / 8u;
-    const auto others = report.usage - std::min<std::uint64_t>(report.usage, mirrorHeld) + otherMirrors;
+    const auto [budget, usage] = tieredDeviceReport(context);
+    if (budget == 0) return std::numeric_limits<std::uint64_t>::max();
+    const auto limit = budget - budget / 8u;
+    const auto others = usage - std::min<std::uint64_t>(usage, mirrorHeld) + otherMirrors;
     return limit - std::min<std::uint64_t>(limit, others);
 }
 
@@ -5457,8 +5510,142 @@ void reportTieredHeaps() {
         }
         std::uint64_t imported = 0;
         for (const auto& [first, last] : heap.imported) imported += last - first;
-        std::fprintf(stderr, "[tiered-heap] 0x%llx+0x%llx: %zu windows of %llu MiB, %zu in VRAM, %zu in imported RAM (%llu MiB imported), %zu empty, %llu imports refused\n", static_cast<unsigned long long>(base), static_cast<unsigned long long>(heap.bytes), heap.tiers.size(), static_cast<unsigned long long>(heap.window >> 20u), vram, ram, static_cast<unsigned long long>(imported >> 20u), heap.tiers.size() - vram - ram, static_cast<unsigned long long>(heap.fallbacks));
+        std::fprintf(stderr, "[tiered-heap] 0x%llx+0x%llx: %zu windows of %llu MiB, %zu in VRAM, %zu in imported RAM (%llu MiB imported), %zu empty, %llu imports refused; %llu demoted, %llu promoted, %llu MiB of VRAM released, %zu releases waiting\n", static_cast<unsigned long long>(base), static_cast<unsigned long long>(heap.bytes), heap.tiers.size(), static_cast<unsigned long long>(heap.window >> 20u), vram, ram, static_cast<unsigned long long>(imported >> 20u), heap.tiers.size() - vram - ram, static_cast<unsigned long long>(heap.fallbacks), static_cast<unsigned long long>(heap.demotions), static_cast<unsigned long long>(heap.promotions), static_cast<unsigned long long>(heap.unboundBytes >> 20u), heap.unbinds.size());
     }
+}
+
+
+void releaseRetiredWindows(TieredHeapState& tiered) {
+    struct Due {
+        std::uint64_t base;
+        std::shared_ptr<ImageMirror> mirror;
+        Pieces runs;
+    };
+    std::vector<Due> due;
+    {
+        std::lock_guard lock(tiered.mutex);
+        for (auto& [base, heap] : tiered.heaps) {
+            std::vector<PendingUnbind> kept;
+            for (auto& unbind : heap.unbinds) {
+                if (!unbind.placement.expired()) {
+                    kept.push_back(std::move(unbind));
+                    continue;
+                }
+                auto mirror = unbind.mirror.lock();
+                if (mirror == nullptr || mirror->resident == nullptr) continue;
+                Pieces runs;
+                for (const auto& [first, last] : unbind.runs) {
+                    const auto part = clipPieces(heap.imported, first, last);
+                    runs.insert(runs.end(), part.begin(), part.end());
+                }
+                if (!runs.empty()) due.push_back({base, std::move(mirror), std::move(runs)});
+            }
+            heap.unbinds = std::move(kept);
+        }
+    }
+    for (auto& entry : due) {
+        const auto freed = entry.mirror->resident->Unbind(entry.runs);
+        if (freed == 0) continue;
+        {
+            auto& state = Mirrors();
+            std::lock_guard lock(state.mutex);
+            if (entry.mirror->listed) {
+                const auto taken = std::min(freed, entry.mirror->accounted);
+                entry.mirror->accounted -= taken;
+                state.heapBytes -= std::min(taken, state.heapBytes);
+            }
+        }
+        std::lock_guard lock(tiered.mutex);
+        if (const auto found = tiered.heaps.find(entry.base); found != tiered.heaps.end()) found->second.unboundBytes += freed;
+    }
+}
+
+void planTieredMoves(const Context& context) {
+    if (!tieredHeapsEnabled() || !tieredMovesEnabled()) return;
+    const auto frame = HostImportFramesEnded();
+    auto& tiered = TieredHeaps();
+    std::vector<TieredHeap> shapes;
+    std::uint64_t plan = 0;
+    {
+        std::lock_guard lock(tiered.mutex);
+        if (tiered.heaps.empty() || tiered.device != context.device || frame < tiered.plannedFrame + tieredMoveFrames()) return;
+        tiered.plannedFrame = frame;
+        plan = ++tiered.plans;
+        for (const auto& [base, heap] : tiered.heaps) {
+            auto shape = heap;
+            shape.unbinds.clear();
+            shapes.push_back(std::move(shape));
+        }
+    }
+    releaseRetiredWindows(tiered);
+    std::uint64_t pending = 0;
+    for (auto& shape : shapes) {
+        const auto committed = GuestMemory::DescribeCommitted(shape.base, static_cast<std::size_t>(shape.bytes)).ranges;
+        for (std::size_t index = 0; index < shape.tiers.size(); ++index) {
+            if (shape.tiers[index] == WindowTier::Empty) continue;
+            const auto [begin, end] = tierWindow(shape, index);
+            std::uint64_t stamp = 0;
+            for (const auto& [first, last] : clipPieces(committed, begin, end)) {
+                if (shape.tiers[index] == WindowTier::Ram) GuestMemory::CollectWrites(first, static_cast<std::size_t>(last - first));
+                stamp = std::max(stamp, GuestMemory::NewestStamp(first, static_cast<std::size_t>(last - first)));
+            }
+            if (stamp > shape.stamps[index]) {
+                shape.stamps[index] = stamp;
+                shape.active[index] = plan;
+            }
+        }
+    }
+    {
+        std::lock_guard lock(tiered.mutex);
+        for (const auto& shape : shapes) {
+            const auto found = tiered.heaps.find(shape.base);
+            if (found == tiered.heaps.end() || found->second.tiers.size() != shape.tiers.size()) continue;
+            found->second.stamps = shape.stamps;
+            found->second.active = shape.active;
+            for (const auto& unbind : found->second.unbinds) {
+                for (const auto& [first, last] : unbind.runs) pending += last - first;
+            }
+        }
+    }
+    const auto [budget, usage] = tieredDeviceReport(context);
+    if (budget == 0) return;
+    const auto limit = budget - budget / 8u;
+    const auto expected = usage - std::min(usage, pending);
+    const auto movable = [&](const TieredHeap& shape, std::size_t index) { return shape.moved[index] == 0 || shape.moved[index] + TieredMoveCooldownPlans <= plan; };
+    std::optional<std::pair<std::uint64_t, std::size_t>> chosen;
+    WindowTier target = WindowTier::Empty;
+    if (expected > limit) {
+        std::uint64_t coldest = std::numeric_limits<std::uint64_t>::max();
+        for (const auto& shape : shapes) {
+            for (std::size_t index = 0; index < shape.tiers.size(); ++index) {
+                if (shape.tiers[index] != WindowTier::Vram || !movable(shape, index) || shape.active[index] >= coldest) continue;
+                coldest = shape.active[index];
+                chosen = std::pair{shape.base, index};
+            }
+        }
+        target = WindowTier::Ram;
+    } else {
+        std::uint64_t hottest = 0;
+        for (const auto& shape : shapes) {
+            if (expected + 2 * shape.window >= limit) continue;
+            for (std::size_t index = 0; index < shape.tiers.size(); ++index) {
+                if (shape.tiers[index] != WindowTier::Ram || !movable(shape, index) || shape.active[index] + TieredActivePlans < plan || shape.active[index] <= hottest) continue;
+                hottest = shape.active[index];
+                chosen = std::pair{shape.base, index};
+            }
+        }
+        target = WindowTier::Vram;
+    }
+    if (!chosen) return;
+    {
+        std::lock_guard lock(tiered.mutex);
+        const auto found = tiered.heaps.find(chosen->first);
+        if (found == tiered.heaps.end() || chosen->second >= found->second.tiers.size()) return;
+        found->second.moves.emplace_back(chosen->second, target);
+    }
+    auto& state = Imports();
+    std::lock_guard lock(state.mutex);
+    ++state.epoch;
 }
 
 }
@@ -5475,8 +5662,22 @@ TieredHeapStats TieredHeapCounters() {
         }
         for (const auto& [first, last] : heap.imported) stats.importedBytes += last - first;
         stats.fallbacks += heap.fallbacks;
+        stats.demotions += heap.demotions;
+        stats.promotions += heap.promotions;
+        stats.unboundBytes += heap.unboundBytes;
+        stats.pendingUnbinds += heap.unbinds.size();
     }
     return stats;
+}
+
+void SetTieredHeapMoves(int enabled, std::uint64_t frames) {
+    testTieredMoves.store(enabled, std::memory_order_release);
+    testTieredMoveFrames.store(frames, std::memory_order_release);
+}
+
+void SetTieredHeapDeviceReport(std::uint64_t budget, std::uint64_t usage) {
+    testTieredReportUsage.store(usage, std::memory_order_release);
+    testTieredReportBudget.store(budget, std::memory_order_release);
 }
 
 void SetTieredHeaps(int enabled) {
@@ -5501,6 +5702,9 @@ bool GuestBufferMemory::addTieredHeap(const std::shared_ptr<const GuestAllocatio
     TieredHeap shape;
     std::vector<std::uint64_t> tieredBases;
     std::uint64_t vramPlaced = 0;
+    std::vector<std::size_t> demoted;
+    std::shared_ptr<const void> retired;
+    std::shared_ptr<const void> placement;
     {
         std::lock_guard lock(tiered.mutex);
         if (tiered.device != context.device) {
@@ -5518,9 +5722,33 @@ bool GuestBufferMemory::addTieredHeap(const std::shared_ptr<const GuestAllocatio
             made.bytes = range->bytes;
             made.window = window;
             made.tiers.assign(static_cast<std::size_t>(range->bytes / window), WindowTier::Empty);
+            made.stamps.assign(made.tiers.size(), 0);
+            made.active.assign(made.tiers.size(), 0);
+            made.moved.assign(made.tiers.size(), 0);
             found = tiered.heaps.emplace(range->address, std::move(made)).first;
         }
-        shape = found->second;
+        auto& own = found->second;
+        for (const auto& [index, tier] : own.moves) {
+            if (index >= own.tiers.size()) continue;
+            if (tier == WindowTier::Ram && own.tiers[index] == WindowTier::Vram) {
+                own.tiers[index] = WindowTier::Ram;
+                ++own.demotions;
+                demoted.push_back(index);
+            } else if (tier == WindowTier::Vram && own.tiers[index] == WindowTier::Ram) {
+                own.tiers[index] = WindowTier::Vram;
+                ++own.promotions;
+            } else {
+                continue;
+            }
+            own.moved[index] = tiered.plans;
+        }
+        own.moves.clear();
+        if (!demoted.empty()) {
+            retired = own.placement;
+            own.placement = std::make_shared<int>(0);
+        }
+        placement = own.placement;
+        shape = own;
         for (const auto& [base, heap] : tiered.heaps) {
             tieredBases.push_back(base);
             for (std::size_t index = 0; index < heap.tiers.size(); ++index) {
@@ -5595,6 +5823,15 @@ bool GuestBufferMemory::addTieredHeap(const std::shared_ptr<const GuestAllocatio
         for (const auto& piece : pieces) heap.imported.emplace_back(piece.begin, piece.end);
         heap.outside = outsideVram(heap, committed.ranges);
         heap.fallbacks += refused;
+        if (retired != nullptr && existing != nullptr && existing->resident != nullptr) {
+            PendingUnbind unbind{retired, existing, {}};
+            for (const auto index : demoted) {
+                const auto [begin, end] = tierWindow(heap, index);
+                const auto part = clipPieces(heap.imported, begin, end);
+                unbind.runs.insert(unbind.runs.end(), part.begin(), part.end());
+            }
+            if (!unbind.runs.empty()) heap.unbinds.push_back(std::move(unbind));
+        }
     }
     auto mirror = acquireMirror(context, range, *buildingBlocks, true);
     if (mirror == nullptr) {
@@ -5609,6 +5846,7 @@ bool GuestBufferMemory::addTieredHeap(const std::shared_ptr<const GuestAllocatio
         if (begin >= end) return;
         Region part{begin, end, range->writable, {}, nullptr};
         part.mirror = mirror;
+        part.placement = placement;
         if (mirror->sparse) {
             part.sparse = true;
             part.backed = clipPieces(mirror->committed, begin, end);
@@ -5639,6 +5877,7 @@ void GuestBufferMemory::AcquireRegistered() {
     const BuildingScope buildingScope(this);
     Require(!uploaded && regions.empty() && lease.empty() && space == nullptr, "guest allocation lease must precede resource registration");
     ensurePinWaiter();
+    planTieredMoves(context);
     reportTieredHeaps();
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
     auto& timing = ThreadAddressTiming();

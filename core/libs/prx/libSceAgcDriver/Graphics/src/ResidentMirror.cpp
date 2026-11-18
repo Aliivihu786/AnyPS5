@@ -490,6 +490,31 @@ void ResidentBuffer::Bind(const GuestRuns& runs) {
     for (const auto index : made) MarkChanged(origin + index * BlockSize, origin + (index + 1) * BlockSize);
 }
 
+std::uint64_t ResidentBuffer::Unbind(const GuestRuns& runs) {
+    std::vector<VkSparseMemoryBind> binds;
+    std::vector<std::size_t> released;
+    for (const auto& [first, last] : runs) {
+        const auto from = std::max(first, origin);
+        const auto to = std::min(last, origin + size);
+        const auto begin = (from - origin + BlockSize - 1) / BlockSize;
+        const auto end = to > origin ? (to - origin) / BlockSize : 0;
+        for (auto index = static_cast<std::size_t>(begin); index < end; ++index) {
+            if (slots[index].host == nullptr) continue;
+            binds.push_back({index * BlockSize, BlockSize, memory->Zero(), 0, 0});
+            released.push_back(index);
+        }
+    }
+    if (binds.empty()) return 0;
+    if (auto* recorder = Recorder::Active(); recorder != nullptr) recorder->Sync();
+    submit(binds);
+    for (const auto index : released) {
+        memory->Put(static_cast<ResidentMemory::Slab*>(slots[index].slab), slots[index].index);
+        slots[index] = {};
+    }
+    bound -= released.size();
+    return static_cast<std::uint64_t>(released.size()) * BlockBytes;
+}
+
 void ResidentBuffer::MarkChanged(std::uint64_t begin, std::uint64_t end) {
     if (begin >= end) return;
     bool first = false;

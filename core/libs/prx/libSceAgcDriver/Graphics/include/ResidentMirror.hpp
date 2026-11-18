@@ -40,6 +40,7 @@ public:
     std::byte* Block(std::uint64_t guest) const;
     std::uint64_t UnboundBytes(const GuestRuns& runs) const;
     void Bind(const GuestRuns& runs);
+    std::uint64_t Unbind(const GuestRuns& runs);
     void MarkChanged(std::uint64_t begin, std::uint64_t end);
     void Read(std::uint64_t guest, std::span<std::byte> out) const;
     void Store(std::uint64_t guest, std::span<const std::byte> bytes);

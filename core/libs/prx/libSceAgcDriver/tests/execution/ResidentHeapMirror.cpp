@@ -294,6 +294,56 @@ void ResidentTests(AgcDriver::VulkanDevice& device) {
     CheckStores(written, "a stamped block that did not change");
 }
 
+void TieredMoveTests(AgcDriver::VulkanDevice& device) {
+    constexpr std::uint64_t Window = 2u << 20u;
+    GuestHeap read(false);
+    GuestHeap written(true, 1, 4 * Block);
+    const OutputBlock output;
+    for (std::uint32_t thread = 0; thread * ThreadStride < Block; ++thread) read.Store(thread * ThreadStride, Pattern(thread));
+    const ImportBudget budget(AgcDriver::Graphics::HostImportLiveBytes() + 2 * Window);
+    AgcDriver::Graphics::SetHostImportRangeWindow(Window);
+    AgcDriver::Graphics::SetTieredHeaps(1);
+    AgcDriver::Graphics::SetTieredHeapMinBytes(Window);
+    AgcDriver::Graphics::SetTieredHeapVramBudget(4 * Window);
+    AgcDriver::Graphics::SetTieredHeapMoves(1, 1);
+    AgcDriver::Graphics::SetTieredHeapDeviceReport(64 * Window, 0);
+    const auto before = AgcDriver::Graphics::TieredHeapCounters();
+    const auto heldBy = [&] { return AgcDriver::Graphics::HeapMirrorsWithin(read.Address(), read.Address() + HeapBytes).bytes; };
+    Dispatch(device, read, written, output);
+    CheckReads(output, "tiered heap in VRAM", false);
+    Require(AgcDriver::Graphics::TieredHeapCounters().vramWindows == before.vramWindows + 1, "resident heap mirror: the tiered heap's written window was not placed in VRAM");
+    const auto held = heldBy();
+    Require(held != 0, "resident heap mirror: the tiered heap's VRAM window holds no mirror blocks");
+    AgcDriver::Graphics::SetTieredHeapDeviceReport(64 * Window, 64 * Window);
+    AgcDriver::Graphics::NoteHostImportFrame();
+    Dispatch(device, read, written, output);
+    CheckReads(output, "tiered heap window demoted to a host import", false);
+    Require(AgcDriver::Graphics::TieredHeapCounters().demotions == before.demotions + 1, "resident heap mirror: VRAM over its budget did not demote the tiered heap's window");
+    AgcDriver::Graphics::NoteHostImportFrame();
+    Dispatch(device, read, written, output);
+    CheckReads(output, "tiered heap window served by its import after the release", false);
+    const auto released = AgcDriver::Graphics::TieredHeapCounters();
+    Require(released.unboundBytes > before.unboundBytes && released.pendingUnbinds == 0, "resident heap mirror: the demoted window's mirror blocks were not released once its last user retired");
+    const auto releasedHeld = heldBy();
+    Require(releasedHeld < held, "resident heap mirror: releasing a demoted window left the heap mirror's device memory held");
+    AgcDriver::Graphics::SetTieredHeapDeviceReport(64 * Window, 0);
+    for (std::uint32_t frame = 0; frame < 20 && AgcDriver::Graphics::TieredHeapCounters().promotions == before.promotions; ++frame) {
+        read.Store(LateThread * ThreadStride, Pattern(LateThread));
+        AgcDriver::Graphics::NoteHostImportFrame();
+        Dispatch(device, read, written, output);
+    }
+    Require(AgcDriver::Graphics::TieredHeapCounters().promotions == before.promotions + 1, "resident heap mirror: VRAM headroom did not promote the recently written tiered heap window");
+    Dispatch(device, read, written, output);
+    CheckReads(output, "tiered heap window promoted back to VRAM", true);
+    Require(heldBy() > releasedHeld, "resident heap mirror: the promoted window's mirror blocks were not bound again");
+    AgcDriver::Graphics::SetTieredHeapDeviceReport(0, 0);
+    AgcDriver::Graphics::SetTieredHeapMoves(-1, 0);
+    AgcDriver::Graphics::SetTieredHeapVramBudget(0);
+    AgcDriver::Graphics::SetTieredHeapMinBytes(0);
+    AgcDriver::Graphics::SetTieredHeaps(-1);
+    AgcDriver::Graphics::SetHostImportRangeWindow(std::uint64_t{64} << 20u);
+}
+
 void StagingChunkTests(AgcDriver::VulkanDevice& device) {
     constexpr std::uint64_t LargeBytes = 48u << 20u;
     constexpr std::uint64_t ChunkBoundary = 32u << 20u;
@@ -381,6 +431,10 @@ struct ImportWindow {
 void PartialImportTests(AgcDriver::VulkanDevice& device, bool copied, bool readFirst) {
     const AddressSpaceLimit limit(copied ? 1 : 0);
     const ImportWindow window(2 * Block);
+    struct Untiered {
+        Untiered() { AgcDriver::Graphics::SetTieredHeaps(0); }
+        ~Untiered() { AgcDriver::Graphics::SetTieredHeaps(-1); }
+    } untiered;
     GuestHeap first(!readFirst);
     GuestHeap second(readFirst);
     const auto& read = readFirst ? first : second;
@@ -609,6 +663,7 @@ int main() {
         const bool sparse = context.sparseBinding && context.sparseResidencyBuffer && context.sparseResidencyAliased;
         if (sparse) {
             ResidentTests(*device);
+            TieredMoveTests(*device);
             StagingChunkTests(*device);
             ReusedAddressTests(*device);
             JoinedImportTests(*device);

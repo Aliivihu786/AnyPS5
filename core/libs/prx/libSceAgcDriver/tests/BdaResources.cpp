@@ -3355,11 +3355,13 @@ void partialHeapImportBudgetCase(const Context& context, const BdaTestAccess& ac
 
 void partialHeapImportBudgetTests(const Context& context, const BdaTestAccess& access) {
     constexpr std::size_t window = 2 * 65536;
+    SetTieredHeaps(0);
     partialHeapImportBudgetCase(context, access, 3 * window, 2 * window, 2 * window);
     partialHeapImportBudgetCase(context, access, 3 * window + 65536, 3 * window, 2 * window);
     SetHostImportMaxBytes(window);
     partialHeapImportBudgetCase(context, access, 3 * window, 2 * window, 2 * window);
     SetHostImportMaxBytes(0);
+    SetTieredHeaps(-1);
 }
 
 void importedHeapMirrorTests(const Context& context, const BdaTestAccess& access) {
@@ -4760,6 +4762,129 @@ void RunTieredSparseHeapTests(const Context& context, const BdaTestAccess& acces
     releaseSparse(full, whole);
 #endif
     std::cout << "a tiered sparse heap keeps windows within the VRAM budget in its mirror, imports committed windows past it, and mirrors a window whose import the budget refuses; a fully committed heap is tiered the same way\n";
+}
+
+void RunTieredHeapMoveTests(const Context& context, const BdaTestAccess& access) {
+    constexpr std::size_t block = 65536;
+    constexpr std::size_t window = 2 * block;
+    constexpr std::size_t whole = 4 * window;
+#ifdef _WIN32
+    if (!GuestArena::GuestArenaAvailable_nid_postfix() || !GuestArena::GuestArenaWriteWatched_nid_postfix()) {
+        std::cout << "guest arena unavailable or not write-watched: tiered heap moves not tested\n";
+        return;
+    }
+    auto* guest = static_cast<std::byte*>(GuestArena::GuestArenaAllocate_nid_postfix(whole, block));
+    Require(guest != nullptr, "cannot allocate the tiered heap in the guest arena");
+    GuestArena::GuestArenaCommit_nid_postfix(guest, whole, PAGE_READWRITE, block);
+#else
+    if (!GuestWriteWatch::GuestWriteWatchAvailable_nid_postfix()) {
+        std::cout << "write watch unavailable: tiered heap moves not tested\n";
+        return;
+    }
+    auto* guest = reserveSparse(whole, whole);
+    GuestWriteWatch::GuestWriteWatchRegister_nid_postfix(guest, whole);
+#endif
+    for (std::size_t at = 0; at < whole; at += block) std::memset(guest + at, static_cast<int>(0x31 + at / block), block);
+    const auto base = reinterpret_cast<std::uintptr_t>(guest);
+    auto importing = context;
+    importing.hostImportAlignment = block;
+    SetHostImportRangeWindow(window);
+    SetHostImportBudget(HostImportLiveBytes() + 3 * window);
+    SetTieredHeaps(1);
+    SetTieredHeapMinBytes(window);
+    SetTieredHeapVramBudget(3 * window);
+    SetTieredHeapMoves(1, 1);
+    SetTieredHeapDeviceReport(8 * window, 0);
+    {
+        GuestAllocations::Mutation mutation;
+        mutation.Add(guest, whole, true, true, true);
+    }
+    const auto before = TieredHeapCounters();
+    const auto check = [&](GuestBufferMemory& leased, std::size_t importedWindow, const char* what) {
+        auto covered = base;
+        for (const auto& entry : leased.AddressRanges()) {
+            if (entry.end <= base || entry.begin >= base + whole) continue;
+            Require(entry.begin == covered, "a tiered heap's BDA ranges have a gap or overlap after a move");
+            const auto* imported = ExistingHostImportFor(importing, entry.begin, static_cast<std::size_t>(entry.end - entry.begin));
+            const bool direct = imported != nullptr && entry.deviceAddress == imported->address + entry.begin - imported->base;
+            const auto first = static_cast<std::size_t>((entry.begin - base) / window);
+            const auto last = static_cast<std::size_t>((entry.end - base - 1) / window);
+            if (first <= importedWindow && importedWindow <= last) Require(direct, what);
+            if (!direct) {
+                std::uint32_t adjustment = 0;
+                const auto length = static_cast<std::size_t>(entry.end - entry.begin);
+                const auto view = leased.Descriptor(entry.begin, length, adjustment);
+                const auto data = access.bytes(view.buffer).subspan(view.offset + adjustment);
+                Require(data[0] == guest[entry.begin - base] && data[length - 1] == guest[entry.begin - base + length - 1], "a tiered heap window served by its mirror lost its bytes after a move");
+            }
+            covered = entry.end;
+        }
+        Require(covered == base + whole, "a tiered heap does not cover its range after a move");
+    };
+    {
+        GuestBufferMemory leased(importing);
+        leased.AcquireRegistered();
+        leased.Upload(true);
+        const auto counts = TieredHeapCounters();
+        Require(counts.vramWindows == before.vramWindows + 3 && counts.ramWindows == before.ramWindows + 1, "the moving tiered heap did not start with three windows in VRAM and one imported");
+        check(leased, 3, "the window past the VRAM budget is not imported");
+        leased.WriteBack();
+    }
+    SetTieredHeapDeviceReport(8 * window, 8 * window);
+    NoteHostImportFrame();
+    {
+        GuestBufferMemory leased(importing);
+        leased.AcquireRegistered();
+        leased.Upload(true);
+        const auto counts = TieredHeapCounters();
+        Require(counts.demotions == before.demotions + 1 && counts.vramWindows == before.vramWindows + 2 && counts.ramWindows == before.ramWindows + 2, "VRAM over its budget did not demote one tiered heap window");
+        check(leased, 0, "the coldest VRAM window was not the one demoted to a host import");
+        leased.WriteBack();
+    }
+    SetTieredHeapDeviceReport(8 * window, 0);
+    std::memset(guest + 3 * window + 8, 0x7c, 16);
+    NoteHostImportFrame();
+    {
+        GuestBufferMemory leased(importing);
+        leased.AcquireRegistered();
+        leased.Upload(true);
+        const auto counts = TieredHeapCounters();
+        Require(counts.promotions == before.promotions + 1 && counts.vramWindows == before.vramWindows + 3 && counts.ramWindows == before.ramWindows + 1, "VRAM headroom did not promote the recently written imported window");
+        check(leased, 0, "the demoted window was promoted again before its cooldown");
+        std::uint32_t adjustment = 0;
+        const auto view = leased.Descriptor(base + 3 * window + 8, 16, adjustment);
+        Require(access.bytes(view.buffer)[view.offset + adjustment] == std::byte{0x7c}, "a promoted window does not serve the bytes written while it was imported");
+        leased.WriteBack();
+    }
+    SetTieredHeapDeviceReport(0, 0);
+    SetTieredHeapMoves(-1, 0);
+    SetHostImportBudget(0);
+    SetTieredHeapVramBudget(0);
+    SetTieredHeapMinBytes(0);
+    SetTieredHeaps(-1);
+    SetHostImportRangeWindow(std::uint64_t{64} << 20u);
+    {
+        GuestAllocations::Mutation mutation;
+        mutation.Remove(guest);
+    }
+    {
+        GuestBufferMemory leased(importing);
+        leased.AcquireRegistered();
+        leased.Upload(true);
+        leased.WriteBack();
+    }
+    ClearImageMirrors(importing.device);
+    ClearHostImports(importing.device);
+    ClearSnapshotCopies(importing.device);
+    ClearUploadCopies(importing.device);
+#ifdef _WIN32
+    GuestArena::GuestArenaReset_nid_postfix(guest, whole);
+    GuestArena::GuestArenaRelease_nid_postfix(guest, whole);
+#else
+    GuestWriteWatch::GuestWriteWatchUnregister_nid_postfix(guest, whole);
+    releaseSparse(guest, whole);
+#endif
+    std::cout << "a tiered heap demotes its coldest VRAM window to a host import when VRAM is over budget and promotes a recently written imported window when there is headroom\n";
 }
 
 void RunHeapMirrorReferenceSizeTests(const Context& context, const BdaTestAccess& access) {

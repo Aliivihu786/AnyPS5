@@ -306,11 +306,17 @@ struct TieredHeapStats {
     std::uint64_t ramWindows = 0;
     std::uint64_t importedBytes = 0;
     std::uint64_t fallbacks = 0;
+    std::uint64_t demotions = 0;
+    std::uint64_t promotions = 0;
+    std::uint64_t unboundBytes = 0;
+    std::uint64_t pendingUnbinds = 0;
 };
 TieredHeapStats TieredHeapCounters();
 void SetTieredHeaps(int enabled);
 void SetTieredHeapVramBudget(std::uint64_t bytes);
 void SetTieredHeapMinBytes(std::uint64_t bytes);
+void SetTieredHeapMoves(int enabled, std::uint64_t frames);
+void SetTieredHeapDeviceReport(std::uint64_t budget, std::uint64_t usage);
 std::uint64_t SnapshotMismatches();
 struct HeapMirrorHold {
     std::uint64_t mirrors = 0;
@@ -528,6 +534,7 @@ private:
         // Set when the region is served by an image mirror: nothing is copied; writable mirrors are
         // written back by comparing with the mirror's shadow. Kept alive here for recorded work.
         std::shared_ptr<ImageMirror> mirror {};
+        std::shared_ptr<const void> placement {};
         // The mirror is a descriptor sub-range one found by UploadPrepare (not a lease mirror), which
         // UploadFinish confirms still has its Range before the region binds it.
         bool subrangeMirror = false;
