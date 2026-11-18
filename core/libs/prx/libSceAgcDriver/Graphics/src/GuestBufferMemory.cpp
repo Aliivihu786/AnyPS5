@@ -5615,8 +5615,16 @@ void planTieredMoves(const Context& context) {
     std::optional<std::pair<std::uint64_t, std::size_t>> chosen;
     WindowTier target = WindowTier::Empty;
     if (expected > limit) {
+        std::uint64_t importRoom = 0;
+        {
+            auto& state = Imports();
+            std::lock_guard lock(state.mutex);
+            const auto importBudget = effectiveBudget(context, state);
+            importRoom = importBudget - std::min(importBudget, pinnedTotal(state));
+        }
         std::uint64_t coldest = std::numeric_limits<std::uint64_t>::max();
         for (const auto& shape : shapes) {
+            if (importRoom < shape.window) continue;
             for (std::size_t index = 0; index < shape.tiers.size(); ++index) {
                 if (shape.tiers[index] != WindowTier::Vram || !movable(shape, index) || shape.active[index] >= coldest) continue;
                 coldest = shape.active[index];
@@ -5819,18 +5827,22 @@ bool GuestBufferMemory::addTieredHeap(const std::shared_ptr<const GuestAllocatio
         for (std::size_t index = 0; index < heap.tiers.size(); ++index) {
             if (heap.tiers[index] == WindowTier::Empty) heap.tiers[index] = shape.tiers[index];
         }
+        const auto previous = std::move(heap.imported);
         heap.imported.clear();
         for (const auto& piece : pieces) heap.imported.emplace_back(piece.begin, piece.end);
         heap.outside = outsideVram(heap, committed.ranges);
         heap.fallbacks += refused;
-        if (retired != nullptr && existing != nullptr && existing->resident != nullptr) {
-            PendingUnbind unbind{retired, existing, {}};
-            for (const auto index : demoted) {
-                const auto [begin, end] = tierWindow(heap, index);
-                const auto part = clipPieces(heap.imported, begin, end);
-                unbind.runs.insert(unbind.runs.end(), part.begin(), part.end());
+        Pieces released;
+        for (const auto& span : subtractPieces(heap.imported, previous)) {
+            if (boundIn(span.first, span.second)) released.push_back(span);
+        }
+        if (!released.empty()) {
+            if (retired == nullptr) {
+                retired = heap.placement;
+                heap.placement = std::make_shared<int>(0);
+                placement = heap.placement;
             }
-            if (!unbind.runs.empty()) heap.unbinds.push_back(std::move(unbind));
+            heap.unbinds.push_back({retired, existing, std::move(released)});
         }
     }
     auto mirror = acquireMirror(context, range, *buildingBlocks, true);
