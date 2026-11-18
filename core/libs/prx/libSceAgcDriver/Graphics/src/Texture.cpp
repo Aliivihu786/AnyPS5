@@ -334,8 +334,8 @@ VkImageViewType ViewTypeFor(TextureDimension dimension, [[maybe_unused]] std::ui
 
 namespace {
 
-void ChainMinLod(const Context& context, const GuestTextureResource& descriptor, VkImageViewCreateInfo& viewInfo, VkImageViewMinLodCreateInfoEXT& minLod) {
-    const auto clamp = EffectiveMinLod(descriptor);
+void ChainMinLod(const Context& context, const GuestTextureResource& descriptor, VkImageViewCreateInfo& viewInfo, VkImageViewMinLodCreateInfoEXT& minLod, float firstMappedLevel = 0.0f) {
+    const auto clamp = std::max(EffectiveMinLod(descriptor), firstMappedLevel);
     if (clamp == 0.0f) return;
     Require(context.imageViewMinLod || context.shaderImageMinLod, "guest texture descriptor uses a minimum LOD clamp, which needs VK_EXT_image_view_min_lod, or shaderResourceMinLod without graphics pipeline libraries");
     if (!context.imageViewMinLod) return;
@@ -410,6 +410,28 @@ static std::uint32_t UnmappedLevelsBelowMinLod(const GuestTextureResource& descr
             if (!GuestMemory::CommittedRanges(descriptor.baseAddress + geometry.GuestOffset(layer, mip), static_cast<std::size_t>(mip.tiledSize), false).empty()) return levels;
         }
     }
+    return levels;
+}
+
+static std::uint32_t TextureQualityLevels() {
+    static const std::uint32_t levels = [] {
+        const char* text = std::getenv("ANYPS5_TEXTURE_QUALITY");
+        if (text == nullptr || *text == '\0') return 0u;
+        const std::string_view value(text);
+        if (value == "high") return 0u;
+        if (value == "medium") return 1u;
+        if (value == "low") return 2u;
+        throw std::runtime_error("AGC graphics: ANYPS5_TEXTURE_QUALITY must be high, medium, low or unset");
+    }();
+    return levels;
+}
+
+static std::uint32_t QualityLevelsLeftOut(const GuestTextureResource& descriptor, const SurfaceGeometry& geometry) {
+    const auto wanted = TextureQualityLevels();
+    if (wanted == 0 || descriptor.baseLevel != 0 || (descriptor.dimension != TextureDimension::k2D && descriptor.dimension != TextureDimension::k2DArray) || geometry.thick) return 0;
+    const auto lastViewLevel = std::min(descriptor.lastLevel, descriptor.mipCount - 1u);
+    std::uint32_t levels = 0;
+    while (levels < wanted && levels < lastViewLevel && levels < geometry.mips.size() && !geometry.mips[levels].tail) ++levels;
     return levels;
 }
 
@@ -603,7 +625,7 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
         imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | (srgbExpand ? VK_IMAGE_USAGE_TRANSFER_SRC_BIT : 0u);
         imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
         imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        const auto unmapped = depthCompare || srgbExpand || clear != nullptr ? 0u : UnmappedLevelsBelowMinLod(descriptor, geometry);
+        const auto unmapped = depthCompare || srgbExpand || clear != nullptr ? 0u : std::max(UnmappedLevelsBelowMinLod(descriptor, geometry), layerRows ? 0u : QualityLevelsLeftOut(descriptor, geometry));
         auto skip = unmapped != 0 && SparseLevelsSupported(context, imageInfo) ? unmapped : 0u;
         const auto denseInfo = imageInfo;
         const std::array<std::uint32_t, 2> families{context.queueFamily, context.sparseFamily};
@@ -640,6 +662,7 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
             allocationBytes = owned->memoryBytes;
             Check(context.Function<PFN_vkBindImageMemory>("vkBindImageMemory")(context.device, image, owned->allocation.Memory(), owned->allocation.Offset()), "vkBindImageMemory");
         }
+        unmappedLevels = skip;
 
         const VkImage uploadImage = image;
         std::shared_ptr<OwnedImage> uploadOwned;
@@ -894,7 +917,7 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
         viewInfo.components = depthCompare ? VkComponentMapping{} : components;
         viewInfo.subresourceRange = layerRows ? VkImageSubresourceRange{aspect, 0, 1, 0, 1} : VkImageSubresourceRange{aspect, descriptor.baseLevel, viewLevelCount, descriptor.baseArray, viewLayerCount};
         VkImageViewMinLodCreateInfoEXT minLod{VK_STRUCTURE_TYPE_IMAGE_VIEW_MIN_LOD_CREATE_INFO_EXT};
-        ChainMinLod(context, descriptor, viewInfo, minLod);
+        ChainMinLod(context, descriptor, viewInfo, minLod, static_cast<float>(unmappedLevels));
 
         Check(context.Function<PFN_vkCreateImageView>("vkCreateImageView")(context.device, &viewInfo, nullptr, &view), "vkCreateImageView");
         viewRange = {viewInfo.viewType, viewInfo.subresourceRange.levelCount, viewInfo.subresourceRange.layerCount};
@@ -1484,7 +1507,7 @@ void Texture::prepareSrgbView(const GuestTextureResource& descriptor, VkImageVie
     viewInfo.pNext = nullptr;
     viewInfo.format = format;
     srgbInfo = viewInfo;
-    srgbMinLod = context.imageViewMinLod ? EffectiveMinLod(descriptor) : 0.0f;
+    srgbMinLod = context.imageViewMinLod ? std::max(EffectiveMinLod(descriptor), static_cast<float>(unmappedLevels)) : 0.0f;
 }
 
 VkImageView Texture::SrgbView(bool firstLayer, bool baseLevel) const {
@@ -1537,6 +1560,7 @@ VkImageView Texture::ArrayView() const {
 
 VkImageView Texture::BaseLevelView() const {
     Require(baseLevelInfo.has_value(), "a base-level view needs a mipmapped 1D, 2D or 2D array texture");
+    Require(unmappedLevels == 0, "a texture whose top mip levels are not in memory (ANYPS5_TEXTURE_QUALITY or a minimum LOD clamp) is read at its base level; unset ANYPS5_TEXTURE_QUALITY");
     std::lock_guard lock(baseLevelMutex);
     if (!baseLevelView) {
         auto info = *baseLevelInfo;

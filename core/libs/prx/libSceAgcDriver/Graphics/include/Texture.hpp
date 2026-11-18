@@ -162,6 +162,7 @@ private:
     VkImageView firstLayerView = VK_NULL_HANDLE;
     ViewRange viewRange{};
     ViewRange firstLayerRange{};
+    std::uint32_t unmappedLevels = 0;
     std::optional<VkImageViewCreateInfo> baseLevelInfo;
     mutable std::mutex baseLevelMutex;
     mutable VkImageView baseLevelView = VK_NULL_HANDLE;

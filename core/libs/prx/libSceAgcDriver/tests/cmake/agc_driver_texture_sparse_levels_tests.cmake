@@ -1,0 +1,7 @@
+if(BUILD_TESTING)
+    add_test(NAME agc_driver_texture_quality_low COMMAND agc_driver_texture_sparse_levels_tests --quality-low)
+    set_tests_properties(agc_driver_texture_quality_low PROPERTIES ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1;APS5_NO_PIPELINE_JOURNAL=1;ANYPS5_TEXTURE_QUALITY=low" SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 60)
+    if(WIN32)
+        set_tests_properties(agc_driver_texture_quality_low PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+endif()

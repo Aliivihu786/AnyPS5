@@ -28,6 +28,7 @@
 #include <mutex>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -354,8 +355,9 @@ bool SparseBc1(const AgcDriver::Graphics::Context& context) {
 
 }
 
-int main() {
+int main(int argc, char** argv) {
     try {
+        const bool qualityLow = argc == 2 && std::string_view(argv[1]) == "--quality-low";
         CheckPlans();
         const auto resident = ResidentBytes(Mips());
         const auto streamedLevel = Padding(Mips()) + static_cast<std::size_t>(Mips()[0].tiledOffset);
@@ -380,6 +382,20 @@ int main() {
             return VulkanTestSkipped;
         }
         ReportDeviceRequirements(context);
+        if (qualityLow) {
+            const char* quality = std::getenv("ANYPS5_TEXTURE_QUALITY");
+            Require(quality != nullptr && std::string_view(quality) == "low", "sparse texture levels: --quality-low needs ANYPS5_TEXTURE_QUALITY=low");
+            FillInput();
+            const auto before = AgcDriver::Graphics::SampledTextureMemory();
+            Dispatch(*device, whole.Texels(), 0u);
+            const auto reduced = AgcDriver::Graphics::SampledTextureMemory() - before;
+            Check("every level mapped, ANYPS5_TEXTURE_QUALITY=low (MIN_LOD 0 read as MIN_LOD 2)", MinLodLevel);
+            const auto clamped = SampleTexture(*device, whole.Texels(), MinLodLevel, "every level mapped, ANYPS5_TEXTURE_QUALITY=low");
+            Require(reduced != 0 && reduced == clamped.bytes, "sparse texture levels: ANYPS5_TEXTURE_QUALITY=low holds " + std::to_string(reduced) + " bytes for a texture without a minimum LOD, and " + std::to_string(clamped.bytes) + " for the same texture at MIN_LOD 2; leaving out the top two levels must hold the same");
+            std::printf("sparse texture levels: ANYPS5_TEXTURE_QUALITY=low holds %llu bytes for a texture without a minimum LOD, as at MIN_LOD 2\n", static_cast<unsigned long long>(reduced));
+            std::puts("sparse texture levels quality tests passed");
+            return 0;
+        }
         GuestBlock cleared(ClearedMips(), ResidentBytes(ClearedMips()));
         const auto clearedAboveMinLod = ClearedTextureBytes(context, cleared.Texels(), MinLodLevel);
         const auto clearedWhole = ClearedTextureBytes(context, cleared.Texels(), 0u);
