@@ -317,6 +317,7 @@ void SetTieredHeapVramBudget(std::uint64_t bytes);
 void SetTieredHeapMinBytes(std::uint64_t bytes);
 void SetTieredHeapMoves(int enabled, std::uint64_t frames);
 void SetTieredHeapDeviceReport(std::uint64_t budget, std::uint64_t usage);
+void SetTieredHeapHostReport(std::uint64_t budget, std::uint64_t usage);
 std::uint64_t SnapshotMismatches();
 struct HeapMirrorHold {
     std::uint64_t mirrors = 0;

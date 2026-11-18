@@ -3710,6 +3710,8 @@ std::atomic<int> testTieredMoves{-1};
 std::atomic<std::uint64_t> testTieredMoveFrames{0};
 std::atomic<std::uint64_t> testTieredReportBudget{0};
 std::atomic<std::uint64_t> testTieredReportUsage{0};
+std::atomic<std::uint64_t> testTieredHostBudget{0};
+std::atomic<std::uint64_t> testTieredHostUsage{0};
 
 bool tieredMovesEnabled() {
     if (const auto test = testTieredMoves.load(std::memory_order_acquire); test >= 0) return test != 0;
@@ -5474,6 +5476,21 @@ std::pair<std::uint64_t, std::uint64_t> tieredDeviceReport(const Context& contex
     return {0, 0};
 }
 
+std::uint64_t tieredHostRoom(const Context& context) {
+    std::uint64_t budget = testTieredHostBudget.load(std::memory_order_acquire);
+    std::uint64_t usage = testTieredHostUsage.load(std::memory_order_acquire);
+    if (budget == 0) {
+        const auto heap = hostHeapIndex(context.memory);
+        if (!heap) return std::numeric_limits<std::uint64_t>::max();
+        const auto report = context.ReportedHeap(*heap);
+        budget = report.budget;
+        usage = report.usage;
+    }
+    if (budget == 0) return std::numeric_limits<std::uint64_t>::max();
+    const auto limit = budget - budget / 16u;
+    return limit - std::min(limit, usage);
+}
+
 std::uint64_t tieredVramCap(const Context& context, const std::vector<std::uint64_t>& tieredBases) {
     if (const auto set = tieredHeapVramSetting(); set != 0) return set;
     std::uint64_t mirrorHeld = 0;
@@ -5622,6 +5639,7 @@ void planTieredMoves(const Context& context) {
             const auto importBudget = effectiveBudget(context, state);
             importRoom = importBudget - std::min(importBudget, pinnedTotal(state));
         }
+        importRoom = std::min(importRoom, tieredHostRoom(context));
         std::uint64_t coldest = std::numeric_limits<std::uint64_t>::max();
         for (const auto& shape : shapes) {
             if (importRoom < shape.window) continue;
@@ -5686,6 +5704,11 @@ void SetTieredHeapMoves(int enabled, std::uint64_t frames) {
 void SetTieredHeapDeviceReport(std::uint64_t budget, std::uint64_t usage) {
     testTieredReportUsage.store(usage, std::memory_order_release);
     testTieredReportBudget.store(budget, std::memory_order_release);
+}
+
+void SetTieredHeapHostReport(std::uint64_t budget, std::uint64_t usage) {
+    testTieredHostUsage.store(usage, std::memory_order_release);
+    testTieredHostBudget.store(budget, std::memory_order_release);
 }
 
 void SetTieredHeaps(int enabled) {
@@ -5795,6 +5818,7 @@ bool GuestBufferMemory::addTieredHeap(const std::shared_ptr<const GuestAllocatio
     }
     std::vector<ImportPiece> pieces;
     std::uint64_t refused = 0;
+    auto hostRoom = tieredHostRoom(context);
     {
         auto& state = Imports();
         std::lock_guard lock(state.mutex);
@@ -5806,6 +5830,11 @@ bool GuestBufferMemory::addTieredHeap(const std::shared_ptr<const GuestAllocatio
                 const auto to = last / alignment * alignment;
                 if (from >= to) continue;
                 const auto fits = [&](const HostImport* entry) { return entry != nullptr && entry->base <= from && entry->base + entry->bytes >= to; };
+                const bool held = fits(peekImport(state, from, to));
+                if (!held && to - from > hostRoom) {
+                    ++refused;
+                    continue;
+                }
                 const auto* entry = importAllocation(context, state, from, lease, ImportRequester::Build, to, false);
                 if (!fits(entry)) {
                     const MirrorsYield yield(state, state.buildFloor);
@@ -5815,6 +5844,7 @@ bool GuestBufferMemory::addTieredHeap(const std::shared_ptr<const GuestAllocatio
                     ++refused;
                     continue;
                 }
+                if (!held) hostRoom -= std::min(hostRoom, to - from);
                 pieces.push_back({from, to, entry});
             }
         }

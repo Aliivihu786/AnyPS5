@@ -4666,6 +4666,24 @@ void RunTieredSparseHeapTests(const Context& context, const BdaTestAccess& acces
         Require(data[0] == std::byte{0x44} && data[window - 1] == std::byte{0x44}, "a window whose import the budget refused lost its bytes in the heap mirror");
         leased.WriteBack();
     }
+    SetHostImportBudget(live + reserved);
+    SetTieredHeapHostReport(16 * window, 16 * window - window / 2);
+    commit(9 * window, window);
+    std::memset(guest + 9 * window, 0x45, window);
+    {
+        const auto refusals = TieredHeapCounters().fallbacks;
+        GuestBufferMemory leased(importing);
+        leased.AcquireRegistered();
+        leased.Upload(true);
+        Require(TieredHeapCounters().fallbacks > refusals, "a window was imported although the host heap's reported usage left no room");
+        Require(ExistingHostImportFor(importing, base + 9 * window, window) == nullptr, "a window past the host heap's reported budget has a host import");
+        std::uint32_t adjustment = 0;
+        const auto view = leased.Descriptor(base + 9 * window, window, adjustment);
+        const auto data = access.bytes(view.buffer).subspan(view.offset + adjustment);
+        Require(data[0] == std::byte{0x45} && data[window - 1] == std::byte{0x45}, "a window kept out of the full host heap lost its bytes in the heap mirror");
+        leased.WriteBack();
+    }
+    SetTieredHeapHostReport(0, 0);
     SetHostImportBudget(0);
     SetTieredHeapVramBudget(0);
     SetTieredHeapMinBytes(0);
