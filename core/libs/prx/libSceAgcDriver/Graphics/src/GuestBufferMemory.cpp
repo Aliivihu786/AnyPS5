@@ -417,6 +417,7 @@ struct HostImports {
     std::uint64_t frameFloor = 0;
     std::uint64_t previousFrameFloor = 0;
     std::uint64_t framesEnded = 0;
+    std::uint64_t allowance = 0;
     bool mirrorsYield = false;
     std::array<HostImportRequesterCounts, ImportRequesterCount> counts{};
     VkPhysicalDevice reportedDevice = VK_NULL_HANDLE;
@@ -2086,8 +2087,20 @@ std::uint64_t effectiveBudget(const Context& context, HostImports& state) {
     noteReportedBudget(state, configured, set, reported);
     const auto budget = HostImportBudgetWith(configured, set, reported, state.allocationFailed, state.ceiling);
     if (budget > state.growthFloor) state.growthDue = true;
+    if (state.allowance != 0) {
+        const auto pinned = pinnedTotal(state);
+        return std::max(budget, pinned + std::min(state.allowance, std::numeric_limits<std::uint64_t>::max() - pinned));
+    }
     return budget;
 }
+
+struct ImportAllowance {
+    HostImports& state;
+    ImportAllowance(HostImports& state, std::uint64_t bytes) : state(state) { state.allowance = bytes; }
+    ~ImportAllowance() { state.allowance = 0; }
+    ImportAllowance(const ImportAllowance&) = delete;
+    ImportAllowance& operator=(const ImportAllowance&) = delete;
+};
 
 std::string budgetSource(const Context& context, const HostImports& state, std::uint64_t budget) {
     const auto configured = importBudget(context);
@@ -3679,13 +3692,19 @@ std::atomic<int> testTieredHeaps{-1};
 std::atomic<std::uint64_t> testTieredVramBytes{0};
 std::atomic<std::uint64_t> testTieredMinBytes{0};
 
-bool tieredHeapsEnabled() {
+bool presetLowers(const Context& context) {
+    const auto preset = ActiveGraphicsPreset(context.memory);
+    return preset == GraphicsPreset::Low || preset == GraphicsPreset::Medium;
+}
+
+bool tieredHeapsEnabled(const Context& context) {
     if (const auto test = testTieredHeaps.load(std::memory_order_acquire); test >= 0) return test != 0;
-    static const bool enabled = [] {
+    static const std::optional<bool> enabled = []() -> std::optional<bool> {
         const char* value = std::getenv("APS5_TIERED_HEAPS");
-        return value != nullptr && *value != '\0' && std::string_view(value) != "0";
+        if (value == nullptr || *value == '\0') return std::nullopt;
+        return std::string_view(value) != "0";
     }();
-    return enabled;
+    return enabled.value_or(presetLowers(context));
 }
 
 std::uint64_t tieredHeapMinBytes() {
@@ -3713,13 +3732,14 @@ std::atomic<std::uint64_t> testTieredReportUsage{0};
 std::atomic<std::uint64_t> testTieredHostBudget{0};
 std::atomic<std::uint64_t> testTieredHostUsage{0};
 
-bool tieredMovesEnabled() {
+bool tieredMovesEnabled(const Context& context) {
     if (const auto test = testTieredMoves.load(std::memory_order_acquire); test >= 0) return test != 0;
-    static const bool enabled = [] {
+    static const std::optional<bool> enabled = []() -> std::optional<bool> {
         const char* value = std::getenv("APS5_TIERED_HEAP_MOVES");
-        return value != nullptr && *value != '\0' && std::string_view(value) != "0";
+        if (value == nullptr || *value == '\0') return std::nullopt;
+        return std::string_view(value) != "0";
     }();
-    return enabled;
+    return enabled.value_or(presetLowers(context));
 }
 
 std::uint64_t tieredMoveFrames() {
@@ -3751,6 +3771,7 @@ struct TieredHeap {
     std::vector<std::uint64_t> stamps;
     std::vector<std::uint64_t> active;
     std::vector<std::uint64_t> moved;
+    std::vector<std::uint32_t> slots;
     std::vector<std::pair<std::size_t, WindowTier>> moves;
     Pieces imported;
     Pieces outside;
@@ -3769,7 +3790,11 @@ struct TieredHeapState {
     std::chrono::steady_clock::time_point lastReport{};
     std::uint64_t plannedFrame = 0;
     std::uint64_t plans = 0;
+    std::uint32_t nextReadSlot = 1;
 };
+
+std::array<std::atomic<std::uint64_t>, ShaderRecompiler::BdaAbi::ReadFlagSlots + 1> tieredReadPlans{};
+std::atomic<std::uint64_t> tieredPlan{0};
 
 TieredHeapState& TieredHeaps() {
     static TieredHeapState state;
@@ -3831,6 +3856,8 @@ void clearTieredHeaps(VkDevice device) {
     std::lock_guard lock(state.mutex);
     if (state.device != device) return;
     state.heaps.clear();
+    state.nextReadSlot = 1;
+    for (auto& plan : tieredReadPlans) plan.store(0, std::memory_order_relaxed);
 }
 
 bool refreshSparseMirror(ImageMirror& mirror, std::vector<RefreshBlock>& blocks, bool placed = false) {
@@ -5578,7 +5605,7 @@ void releaseRetiredWindows(TieredHeapState& tiered) {
 }
 
 void planTieredMoves(const Context& context) {
-    if (!tieredHeapsEnabled() || !tieredMovesEnabled()) return;
+    if (!tieredHeapsEnabled(context) || !tieredMovesEnabled(context)) return;
     const auto frame = HostImportFramesEnded();
     auto& tiered = TieredHeaps();
     std::vector<TieredHeap> shapes;
@@ -5588,6 +5615,7 @@ void planTieredMoves(const Context& context) {
         if (tiered.heaps.empty() || tiered.device != context.device || frame < tiered.plannedFrame + tieredMoveFrames()) return;
         tiered.plannedFrame = frame;
         plan = ++tiered.plans;
+        tieredPlan.store(plan, std::memory_order_relaxed);
         for (const auto& [base, heap] : tiered.heaps) {
             auto shape = heap;
             shape.unbinds.clear();
@@ -5610,6 +5638,7 @@ void planTieredMoves(const Context& context) {
                 shape.stamps[index] = stamp;
                 shape.active[index] = plan;
             }
+            if (const auto slot = shape.slots[index]; slot != 0) shape.active[index] = std::max(shape.active[index], std::min(plan, tieredReadPlans[slot].load(std::memory_order_relaxed)));
         }
     }
     {
@@ -5632,14 +5661,7 @@ void planTieredMoves(const Context& context) {
     std::optional<std::pair<std::uint64_t, std::size_t>> chosen;
     WindowTier target = WindowTier::Empty;
     if (expected > limit) {
-        std::uint64_t importRoom = 0;
-        {
-            auto& state = Imports();
-            std::lock_guard lock(state.mutex);
-            const auto importBudget = effectiveBudget(context, state);
-            importRoom = importBudget - std::min(importBudget, pinnedTotal(state));
-        }
-        importRoom = std::min(importRoom, tieredHostRoom(context));
+        const auto importRoom = tieredHostRoom(context);
         std::uint64_t coldest = std::numeric_limits<std::uint64_t>::max();
         for (const auto& shape : shapes) {
             if (importRoom < shape.window) continue;
@@ -5692,6 +5714,7 @@ TieredHeapStats TieredHeapCounters() {
         stats.promotions += heap.promotions;
         stats.unboundBytes += heap.unboundBytes;
         stats.pendingUnbinds += heap.unbinds.size();
+        for (const auto slot : heap.slots) stats.gpuReadWindows += slot != 0 && tieredReadPlans[slot].load(std::memory_order_relaxed) != 0;
     }
     return stats;
 }
@@ -5704,6 +5727,13 @@ void SetTieredHeapMoves(int enabled, std::uint64_t frames) {
 void SetTieredHeapDeviceReport(std::uint64_t budget, std::uint64_t usage) {
     testTieredReportUsage.store(usage, std::memory_order_release);
     testTieredReportBudget.store(budget, std::memory_order_release);
+}
+
+void NoteTieredReads(const std::uint32_t* faultWords) {
+    const auto stamp = tieredPlan.load(std::memory_order_relaxed) + 1;
+    ShaderRecompiler::BdaAbi::ForEachReadSlot(faultWords, [&](std::uint32_t slot) {
+        if (slot <= ShaderRecompiler::BdaAbi::ReadFlagSlots) tieredReadPlans[slot].store(stamp, std::memory_order_relaxed);
+    });
 }
 
 void SetTieredHeapHostReport(std::uint64_t budget, std::uint64_t usage) {
@@ -5726,7 +5756,7 @@ void SetTieredHeapMinBytes(std::uint64_t bytes) {
 bool GuestBufferMemory::addTieredHeap(const std::shared_ptr<const GuestAllocations::Range>& range) {
     const auto window = rangeImportWindow.load(std::memory_order_relaxed);
     const auto alignment = context.hostImportAlignment;
-    if (!tieredHeapsEnabled() || buildingBlocks == nullptr || !range->releasable || !mirrorsEnabled() || !sparseMirrorsEnabled()) return false;
+    if (!tieredHeapsEnabled(context) || buildingBlocks == nullptr || !range->releasable || !mirrorsEnabled() || !sparseMirrorsEnabled()) return false;
     if (window == 0 || alignment == 0 || window % alignment != 0 || range->address % alignment != 0 || range->bytes < std::max(tieredHeapMinBytes(), 2 * window) || WasEvicted(range->address)) return false;
     const auto committed = GuestMemory::DescribeCommitted(range->address, range->bytes);
     auto& tiered = TieredHeaps();
@@ -5756,6 +5786,7 @@ bool GuestBufferMemory::addTieredHeap(const std::shared_ptr<const GuestAllocatio
             made.stamps.assign(made.tiers.size(), 0);
             made.active.assign(made.tiers.size(), 0);
             made.moved.assign(made.tiers.size(), 0);
+            made.slots.assign(made.tiers.size(), 0);
             found = tiered.heaps.emplace(range->address, std::move(made)).first;
         }
         auto& own = found->second;
@@ -5818,6 +5849,7 @@ bool GuestBufferMemory::addTieredHeap(const std::shared_ptr<const GuestAllocatio
     }
     std::vector<ImportPiece> pieces;
     std::uint64_t refused = 0;
+    std::vector<std::uint32_t> slots;
     auto hostRoom = tieredHostRoom(context);
     {
         auto& state = Imports();
@@ -5835,7 +5867,11 @@ bool GuestBufferMemory::addTieredHeap(const std::shared_ptr<const GuestAllocatio
                     ++refused;
                     continue;
                 }
-                const auto* entry = importAllocation(context, state, from, lease, ImportRequester::Build, to, false);
+                const HostImport* entry = nullptr;
+                {
+                    const ImportAllowance allowance(state, hostRoom);
+                    entry = importAllocation(context, state, from, lease, ImportRequester::Build, to, false);
+                }
                 if (!fits(entry)) {
                     const MirrorsYield yield(state, state.buildFloor);
                     entry = importAllocation(context, state, from, lease, ImportRequester::Build, to, true);
@@ -5856,7 +5892,9 @@ bool GuestBufferMemory::addTieredHeap(const std::shared_ptr<const GuestAllocatio
         auto& heap = found->second;
         for (std::size_t index = 0; index < heap.tiers.size(); ++index) {
             if (heap.tiers[index] == WindowTier::Empty) heap.tiers[index] = shape.tiers[index];
+            if (heap.tiers[index] != WindowTier::Empty && heap.slots[index] == 0 && tiered.nextReadSlot <= ShaderRecompiler::BdaAbi::ReadFlagSlots) heap.slots[index] = tiered.nextReadSlot++;
         }
+        slots = heap.slots;
         const auto previous = std::move(heap.imported);
         heap.imported.clear();
         for (const auto& piece : pieces) heap.imported.emplace_back(piece.begin, piece.end);
@@ -5882,18 +5920,31 @@ bool GuestBufferMemory::addTieredHeap(const std::shared_ptr<const GuestAllocatio
         return false;
     }
     const auto mirrorEnd = mirror->base + mirror->bytes;
+    const auto slotAt = [&](std::uint64_t address) {
+        if (slots.empty()) return 0u;
+        const auto index = std::min<std::uint64_t>((address - range->address) / window, slots.size() - 1);
+        return slots[static_cast<std::size_t>(index)];
+    };
+    const auto windowEnd = [&](std::uint64_t address) {
+        const auto index = (address - range->address) / window;
+        return index + 1 >= slots.size() ? range->address + range->bytes : range->address + (index + 1) * window;
+    };
     const auto addMirrored = [&](std::uint64_t begin, std::uint64_t end) {
         begin = std::max(begin, mirror->base);
         end = std::min(end, mirrorEnd);
-        if (begin >= end) return;
-        Region part{begin, end, range->writable, {}, nullptr};
-        part.mirror = mirror;
-        part.placement = placement;
-        if (mirror->sparse) {
-            part.sparse = true;
-            part.backed = clipPieces(mirror->committed, begin, end);
+        while (begin < end) {
+            const auto stop = std::min(end, windowEnd(begin));
+            Region part{begin, stop, range->writable, {}, nullptr};
+            part.mirror = mirror;
+            part.placement = placement;
+            part.readSlot = slotAt(begin);
+            if (mirror->sparse) {
+                part.sparse = true;
+                part.backed = clipPieces(mirror->committed, begin, stop);
+            }
+            regions.push_back(std::move(part));
+            begin = stop;
         }
-        regions.push_back(std::move(part));
     };
     auto cursor = range->address;
     for (const auto& piece : pieces) {
@@ -5901,6 +5952,7 @@ bool GuestBufferMemory::addTieredHeap(const std::shared_ptr<const GuestAllocatio
         Region part{piece.begin, piece.end, range->writable, {}, nullptr};
         part.hostBacked = true;
         part.direct = piece.entry;
+        part.readSlot = slotAt(piece.begin);
         regions.push_back(std::move(part));
         cursor = piece.end;
     }
@@ -8110,7 +8162,7 @@ ShaderRecompiler::BdaAbi::Range GuestBufferMemory::addressRange(const Region& re
     const auto address = region.direct != nullptr ? region.direct->address + (region.begin - region.direct->base) : region.mirror != nullptr ? mirrorAddress(*region.mirror) + (region.begin - region.mirror->base) : region.buffer->DeviceAddress();
     Require(region.end - region.begin <= std::numeric_limits<std::uint64_t>::max() - address, "GPU address range overflow");
     const auto permissions = ShaderRecompiler::BdaAbi::Read | (addressWritable(region) ? ShaderRecompiler::BdaAbi::Write : 0u);
-    return {region.begin, region.direct != nullptr ? inPlaceEnd(region) : servedEnd(region), address, permissions, 0};
+    return {region.begin, region.direct != nullptr ? inPlaceEnd(region) : servedEnd(region), address, permissions, region.readSlot};
 }
 
 std::uint64_t GuestBufferMemory::servedEnd(const Region& region) {

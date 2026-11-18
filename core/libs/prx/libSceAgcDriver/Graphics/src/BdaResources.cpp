@@ -1,4 +1,5 @@
 #include "prx/libSceAgcDriver/Graphics/include/BdaResources.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Mutex.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/MultisampleTarget.hpp"
 #include "ImageTableAbi.hpp"
@@ -144,7 +145,7 @@ bool sharedFaultSlots() {
 constexpr VkDeviceSize FaultChunkBytes = VkDeviceSize{512} * 1024;
 
 VkDeviceSize faultSlotBytes(bool reportOnly) {
-    return reportOnly ? sizeof(ShaderRecompiler::BdaAbi::Fault) : ShaderRecompiler::BdaAbi::FaultBufferBytes;
+    return reportOnly ? ShaderRecompiler::BdaAbi::ReportBufferBytes : ShaderRecompiler::BdaAbi::FaultBufferBytes;
 }
 
 VkDeviceSize faultStride(const Context& context, VkDeviceSize bytes) {
@@ -477,6 +478,7 @@ void BdaResources::CheckUse(const BdaResources* record) const {
 
 void BdaResources::checkFault(const BdaResources& record) const {
     if (record.faultChunk == nullptr) return;
+    if (record.faultBytes().size() >= ShaderRecompiler::BdaAbi::ReportBufferBytes) NoteTieredReads(reinterpret_cast<const std::uint32_t*>(record.faultBytes().data()));
     if (!reportOnly) markWrittenPages(record);
     ShaderRecompiler::BdaAbi::Fault report{};
     std::memcpy(&report, record.faultBytes().data(), sizeof(report));

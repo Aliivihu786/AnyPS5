@@ -1569,6 +1569,14 @@ void setOutputResolution(const char* value) {
 #endif
 }
 
+void setGraphicsPreset(const char* value) {
+#ifdef _WIN32
+    check(_putenv_s("ANYPS5_GRAPHICS_PRESET", value) == 0, "ANYPS5_GRAPHICS_PRESET was not set");
+#else
+    check((*value != ' ' ? setenv("ANYPS5_GRAPHICS_PRESET", value, 1) : unsetenv("ANYPS5_GRAPHICS_PRESET")) == 0, "ANYPS5_GRAPHICS_PRESET was not set");
+#endif
+}
+
 void testOutputResolutionOverride() {
     const int handle = sceVideoOutOpen(255, 0, 0, nullptr);
     SDL_DisplayMode mode{};
@@ -1608,6 +1616,18 @@ void testOutputResolutionOverride() {
     }
     setOutputResolution("");
     check(reported() == following, "clearing the override did not restore the display's resolution");
+    setGraphicsPreset("low");
+    check(reported() == 1u, "ANYPS5_GRAPHICS_PRESET=low did not report a 1080p output");
+    setOutputResolution("3840x2160");
+    check(reported() == 2u, "APS5_OUTPUT_RESOLUTION did not take precedence over ANYPS5_GRAPHICS_PRESET");
+    setOutputResolution("");
+    setGraphicsPreset("high");
+    check(reported() == following, "ANYPS5_GRAPHICS_PRESET=high changed the reported output resolution");
+    setGraphicsPreset("ultra");
+    const auto presetMessage = expectFailure([&] { reported(); });
+    check(presetMessage.find("ANYPS5_GRAPHICS_PRESET") != std::string::npos && presetMessage.find("ultra") != std::string::npos, "an unknown graphics preset was not rejected by name");
+    setGraphicsPreset("");
+    check(reported() == following, "clearing the graphics preset did not restore the display's resolution");
     sceVideoOutClose(handle);
     LibcRunShutdown_nid_postfix();
 }

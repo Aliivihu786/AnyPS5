@@ -413,21 +413,49 @@ static std::uint32_t UnmappedLevelsBelowMinLod(const GuestTextureResource& descr
     return levels;
 }
 
-static std::uint32_t TextureQualityLevels() {
-    static const std::uint32_t levels = [] {
+GraphicsPreset ParseGraphicsPreset(const char* name, const VkPhysicalDeviceMemoryProperties& memory) {
+    if (name == nullptr || *name == '\0') return GraphicsPreset::None;
+    const std::string_view value(name);
+    if (value == "low") return GraphicsPreset::Low;
+    if (value == "medium") return GraphicsPreset::Medium;
+    if (value == "high") return GraphicsPreset::High;
+    if (value != "auto") throw std::runtime_error("AGC graphics: ANYPS5_GRAPHICS_PRESET must be auto, low, medium or high, got \"" + std::string(value) + "\"");
+    VkDeviceSize deviceLocal = 0;
+    for (std::uint32_t heap = 0; heap < memory.memoryHeapCount; ++heap) {
+        if ((memory.memoryHeaps[heap].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0) deviceLocal = std::max(deviceLocal, memory.memoryHeaps[heap].size);
+    }
+    constexpr VkDeviceSize GiB = VkDeviceSize{1} << 30u;
+    return deviceLocal <= 7 * GiB ? GraphicsPreset::Low : deviceLocal <= 11 * GiB ? GraphicsPreset::Medium : GraphicsPreset::High;
+}
+
+GraphicsPreset ActiveGraphicsPreset(const VkPhysicalDeviceMemoryProperties& memory) {
+    static const GraphicsPreset preset = [&] {
+        const char* name = std::getenv("ANYPS5_GRAPHICS_PRESET");
+        const auto chosen = ParseGraphicsPreset(name, memory);
+        static constexpr std::array<const char*, 4> names{"none", "low", "medium", "high"};
+        if (chosen != GraphicsPreset::None) std::fprintf(stderr, "[graphics] ANYPS5_GRAPHICS_PRESET=%s selects the %s preset\n", name, names[static_cast<std::size_t>(chosen)]);
+        return chosen;
+    }();
+    return preset;
+}
+
+static std::uint32_t TextureQualityLevels(const Context& context) {
+    static const std::optional<std::uint32_t> levels = []() -> std::optional<std::uint32_t> {
         const char* text = std::getenv("ANYPS5_TEXTURE_QUALITY");
-        if (text == nullptr || *text == '\0') return 0u;
+        if (text == nullptr || *text == '\0') return std::nullopt;
         const std::string_view value(text);
         if (value == "high") return 0u;
         if (value == "medium") return 1u;
         if (value == "low") return 2u;
         throw std::runtime_error("AGC graphics: ANYPS5_TEXTURE_QUALITY must be high, medium, low or unset");
     }();
-    return levels;
+    if (levels) return *levels;
+    const auto preset = ActiveGraphicsPreset(context.memory);
+    return preset == GraphicsPreset::Low ? 2u : preset == GraphicsPreset::Medium ? 1u : 0u;
 }
 
-static std::uint32_t QualityLevelsLeftOut(const GuestTextureResource& descriptor, const SurfaceGeometry& geometry) {
-    const auto wanted = TextureQualityLevels();
+static std::uint32_t QualityLevelsLeftOut(const Context& context, const GuestTextureResource& descriptor, const SurfaceGeometry& geometry) {
+    const auto wanted = TextureQualityLevels(context);
     if (wanted == 0 || descriptor.baseLevel != 0 || (descriptor.dimension != TextureDimension::k2D && descriptor.dimension != TextureDimension::k2DArray) || geometry.thick) return 0;
     const auto lastViewLevel = std::min(descriptor.lastLevel, descriptor.mipCount - 1u);
     std::uint32_t levels = 0;
@@ -625,7 +653,7 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
         imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | (srgbExpand ? VK_IMAGE_USAGE_TRANSFER_SRC_BIT : 0u);
         imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
         imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        const auto unmapped = depthCompare || srgbExpand || clear != nullptr ? 0u : std::max(UnmappedLevelsBelowMinLod(descriptor, geometry), layerRows ? 0u : QualityLevelsLeftOut(descriptor, geometry));
+        const auto unmapped = depthCompare || srgbExpand || clear != nullptr ? 0u : std::max(UnmappedLevelsBelowMinLod(descriptor, geometry), layerRows ? 0u : QualityLevelsLeftOut(context, descriptor, geometry));
         auto skip = unmapped != 0 && SparseLevelsSupported(context, imageInfo) ? unmapped : 0u;
         const auto denseInfo = imageInfo;
         const std::array<std::uint32_t, 2> families{context.queueFamily, context.sparseFamily};

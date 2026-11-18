@@ -10,6 +10,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 
 #include "SDL.h"
 #include "SDL_vulkan.h"
@@ -83,7 +84,14 @@ std::uint32_t resolutionIndex(std::uint32_t width, std::uint32_t height) {
 
 std::optional<std::uint32_t> configuredResolution() {
     const char* value = std::getenv("APS5_OUTPUT_RESOLUTION");
-    if (value == nullptr || *value == '\0') return std::nullopt;
+    if (value == nullptr || *value == '\0') {
+        const char* preset = std::getenv("ANYPS5_GRAPHICS_PRESET");
+        if (preset == nullptr || *preset == '\0') return std::nullopt;
+        const std::string_view name(preset);
+        if (name == "low" || name == "medium") return VIDEO_OUT_RESOLUTION_1080P;
+        if (name == "high" || name == "auto") return std::nullopt;
+        throw std::runtime_error("VideoOut: ANYPS5_GRAPHICS_PRESET must be auto, low, medium or high, got \"" + std::string(name) + "\"");
+    }
     const std::string text(value);
     const char* end = text.data() + text.size();
     std::uint32_t width = 0;

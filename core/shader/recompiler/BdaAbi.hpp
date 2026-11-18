@@ -8,7 +8,7 @@
 
 namespace ShaderRecompiler::BdaAbi {
 
-inline constexpr std::uint32_t Version = 1;
+inline constexpr std::uint32_t Version = 2;
 inline constexpr std::uint32_t Read = 1;
 inline constexpr std::uint32_t Write = 2;
 
@@ -68,7 +68,11 @@ inline constexpr std::uint32_t WrittenChunkPages = 1u << (WrittenChunkShift - Wr
 inline constexpr std::uint32_t WrittenPageSlots = 2048;
 inline constexpr std::uint32_t WrittenPageProbes = 8;
 inline constexpr std::uint64_t WrittenAddressLimit = std::uint64_t{0xffffffffu} << WrittenChunkShift;
-inline constexpr std::uint32_t WrittenOverflowWord = sizeof(Fault) / sizeof(std::uint32_t);
+inline constexpr std::uint32_t ReadFlagSlots = 4096;
+inline constexpr std::uint32_t ReadFlagWord = sizeof(Fault) / sizeof(std::uint32_t);
+inline constexpr std::uint32_t ReadFlagWords = ReadFlagSlots / 32;
+inline constexpr std::size_t ReportBufferBytes = (ReadFlagWord + ReadFlagWords) * sizeof(std::uint32_t);
+inline constexpr std::uint32_t WrittenOverflowWord = ReadFlagWord + ReadFlagWords;
 inline constexpr std::uint32_t WrittenCountWord = WrittenOverflowWord + 1;
 inline constexpr std::uint32_t WrittenSlotsWord = WrittenCountWord + 1;
 inline constexpr std::uint32_t WrittenListWord = WrittenSlotsWord + 2 * WrittenPageSlots;
@@ -77,9 +81,22 @@ inline constexpr std::uint32_t SrtGuardStageShift = 24;
 inline constexpr std::size_t FaultBufferBytes = (SrtGuardWord + 1) * sizeof(std::uint32_t);
 static_assert((WrittenPageSlots & (WrittenPageSlots - 1)) == 0);
 static_assert(WrittenChunkPages == 32);
+static_assert(ReadFlagSlots % 32 == 0);
 
 inline constexpr std::uint32_t WrittenChunkKey(std::uint64_t address) {
     return static_cast<std::uint32_t>(address >> WrittenChunkShift) + 1u;
+}
+
+template<typename TNote>
+void ForEachReadSlot(const std::uint32_t* words, TNote&& note) {
+    for (std::uint32_t word = 0; word < ReadFlagWords; ++word) {
+        auto bits = words[ReadFlagWord + word];
+        while (bits != 0) {
+            const auto bit = static_cast<std::uint32_t>(std::countr_zero(bits));
+            note(word * 32u + bit + 1u);
+            bits &= bits - 1u;
+        }
+    }
 }
 
 template<typename TMark>

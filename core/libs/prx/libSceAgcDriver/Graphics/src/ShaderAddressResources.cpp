@@ -173,7 +173,11 @@ bool SpirvFaultReportOnly(std::span<const std::uint32_t> words, std::uint32_t se
     std::unordered_map<std::uint32_t, std::uint32_t> bindings;
     std::unordered_map<std::uint32_t, std::uint32_t> constants;
     std::unordered_map<std::uint32_t, std::pair<std::uint32_t, std::uint32_t>> selects;
+    std::unordered_map<std::uint32_t, std::pair<std::uint32_t, std::uint32_t>> adds;
+    std::unordered_map<std::uint32_t, std::pair<std::uint32_t, std::uint32_t>> shifts;
     const bool readable = forEachInstruction(words, [&](std::uint32_t opcode, std::span<const std::uint32_t> instruction) {
+        if (opcode == spv::OpIAdd && instruction.size() == 5) adds[instruction[2]] = {instruction[3], instruction[4]};
+        if (opcode == spv::OpShiftRightLogical && instruction.size() == 5) shifts[instruction[2]] = {instruction[3], instruction[4]};
         if (opcode == spv::OpDecorate && instruction.size() == 4 && instruction[2] == spv::DecorationDescriptorSet) sets[instruction[1]] = instruction[3];
         if (opcode == spv::OpDecorate && instruction.size() == 4 && instruction[2] == spv::DecorationBinding) bindings[instruction[1]] = instruction[3];
         if (opcode == spv::OpConstant && instruction.size() == 4) constants[instruction[2]] = instruction[3];
@@ -192,6 +196,20 @@ bool SpirvFaultReportOnly(std::span<const std::uint32_t> words, std::uint32_t se
         const auto selected = selects.find(id);
         return below(id) || (selected != selects.end() && below(selected->second.first) && below(selected->second.second));
     };
+    const auto constantIs = [&](std::uint32_t id, std::uint32_t value) {
+        const auto found = constants.find(id);
+        return found != constants.end() && found->second == value;
+    };
+    const auto readFlagWord = [&](std::uint32_t id) {
+        const auto add = adds.find(id);
+        if (add == adds.end()) return false;
+        const auto flagShift = [&](std::uint32_t operand) {
+            const auto shift = shifts.find(operand);
+            return shift != shifts.end() && constantIs(shift->second.second, 5u);
+        };
+        const auto [left, right] = add->second;
+        return (constantIs(left, ShaderRecompiler::BdaAbi::ReadFlagWord) && flagShift(right)) || (constantIs(right, ShaderRecompiler::BdaAbi::ReadFlagWord) && flagShift(left));
+    };
     const auto chainsBuffer = [&](std::uint32_t opcode, std::span<const std::uint32_t> instruction) {
         return (opcode == spv::OpAccessChain || opcode == spv::OpInBoundsAccessChain) && instruction.size() > 3 && buffers.contains(instruction[3]);
     };
@@ -199,7 +217,7 @@ bool SpirvFaultReportOnly(std::span<const std::uint32_t> words, std::uint32_t se
     std::unordered_set<std::uint32_t> reportPointers;
     forEachInstruction(words, [&](std::uint32_t opcode, std::span<const std::uint32_t> instruction) {
         if (!chainsBuffer(opcode, instruction)) return;
-        reportOnly = reportOnly && instruction.size() == 6 && constantBelow(instruction[4], 1) && constantBelow(instruction[5], reportWords);
+        reportOnly = reportOnly && instruction.size() == 6 && constantBelow(instruction[4], 1) && (constantBelow(instruction[5], reportWords) || readFlagWord(instruction[5]));
         reportPointers.insert(instruction[2]);
     });
     forEachInstruction(words, [&](std::uint32_t opcode, std::span<const std::uint32_t> instruction) {

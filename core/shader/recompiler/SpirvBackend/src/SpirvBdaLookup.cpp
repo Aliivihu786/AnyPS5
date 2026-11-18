@@ -113,11 +113,12 @@ std::uint32_t DefineBdaLookup(SpirvEmitterState& state, const char* name, bool r
     const auto finish = BdaLoadAddress(state, at(2));
     const auto base = BdaLoadAddress(state, at(4));
     const auto permissions = BdaLoadWord(state, at(6));
+    const auto readSlot = BdaLoadWord(state, at(7));
     const auto offset = binary(spv::OpISub, u64, address, begin);
     const auto result = binary(spv::OpIAdd, u64, base, offset);
     const auto deviceEnd = binary(spv::OpIAdd, u64, result, Unary(state, spv::OpUConvert, u64, bytes));
     failFirst({
-        {binary(spv::OpINotEqual, boolean, BdaLoadWord(state, at(7)), constant(0)), BdaAbi::FaultReason::InvalidTable},
+        {binary(spv::OpUGreaterThan, boolean, readSlot, constant(BdaAbi::ReadFlagSlots)), BdaAbi::FaultReason::InvalidTable},
         {binary(spv::OpUGreaterThanEqual, boolean, begin, finish), BdaAbi::FaultReason::InvalidTable},
         {binary(spv::OpUGreaterThan, boolean, end, finish), BdaAbi::FaultReason::Unmapped},
         {binary(spv::OpINotEqual, boolean, binary(spv::OpBitwiseAnd, u32, permissions, constant(permission)), constant(permission)), BdaAbi::FaultReason::Permission},
@@ -125,6 +126,20 @@ std::uint32_t DefineBdaLookup(SpirvEmitterState& state, const char* name, bool r
         {binary(spv::OpULessThan, boolean, result, base), BdaAbi::FaultReason::Overflow},
         {binary(spv::OpULessThanEqual, boolean, deviceEnd, result), BdaAbi::FaultReason::Overflow},
     });
+    if (state.faultBufferVariable != 0) {
+        EmitIfCondition(state, binary(spv::OpINotEqual, boolean, readSlot, constant(0)), [&] {
+            const auto slot = binary(spv::OpISub, u32, readSlot, constant(1));
+            const auto word = BdaWord(state, state.faultBufferVariable, binary(spv::OpIAdd, u32, constant(BdaAbi::ReadFlagWord), binary(spv::OpShiftRightLogical, u32, slot, constant(5))));
+            const auto bit = binary(spv::OpShiftLeftLogical, u32, constant(1u), binary(spv::OpBitwiseAnd, u32, slot, constant(31)));
+            const auto scope = constant(spv::ScopeDevice);
+            const auto relaxed = constant(spv::MemorySemanticsMaskNone);
+            const auto current = state.module.AllocateId();
+            state.module.AddFunction(spv::OpAtomicLoad, u32, current, word, scope, relaxed);
+            EmitIfCondition(state, binary(spv::OpIEqual, boolean, binary(spv::OpBitwiseAnd, u32, current, bit), constant(0)), [&] {
+                state.module.AddFunction(spv::OpAtomicOr, u32, state.module.AllocateId(), word, scope, relaxed, bit);
+            });
+        });
+    }
     if (rangeResult) {
         const auto last = binary(spv::OpUGreaterThanEqual, boolean, index, count);
         const auto next = BdaLoadAddress(state, binary(spv::OpIAdd, u32, constant(4), binary(spv::OpIMul, u32, Select(state, u32, last, binary(spv::OpISub, u32, index, constant(1)), index), constant(8))));

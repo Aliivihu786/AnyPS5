@@ -344,6 +344,46 @@ void TieredMoveTests(AgcDriver::VulkanDevice& device) {
     AgcDriver::Graphics::SetHostImportRangeWindow(std::uint64_t{64} << 20u);
 }
 
+void TieredReadTests(AgcDriver::VulkanDevice& device) {
+    constexpr std::uint64_t Window = 2u << 20u;
+    const auto context = AgcDriver::VulkanDeviceTestAccess::ContextOf(device);
+    AgcDriver::Graphics::ClearImageMirrors(context.device);
+    GuestHeap read(false);
+    GuestHeap written(true, 1, 4 * Block);
+    const OutputBlock output;
+    for (std::uint32_t thread = 0; thread * ThreadStride < Block; ++thread) read.Store(thread * ThreadStride, Pattern(thread));
+    read.Store(Window + 16, 0x1234u);
+    const ImportBudget budget(AgcDriver::Graphics::HostImportLiveBytes() + 2 * Window);
+    AgcDriver::Graphics::SetHostImportRangeWindow(Window);
+    AgcDriver::Graphics::SetTieredHeaps(1);
+    AgcDriver::Graphics::SetTieredHeapMinBytes(Window);
+    AgcDriver::Graphics::SetTieredHeapVramBudget(4 * Window);
+    AgcDriver::Graphics::SetTieredHeapMoves(1, 1);
+    AgcDriver::Graphics::SetTieredHeapDeviceReport(64 * Window, 0);
+    const auto before = AgcDriver::Graphics::TieredHeapCounters();
+    Dispatch(device, read, written, output);
+    CheckReads(output, "tiered heap read by the GPU", false);
+    Require(AgcDriver::Graphics::TieredHeapCounters().vramWindows == before.vramWindows + 2, "resident heap mirror: the tiered heap's two written windows were not placed in VRAM");
+    for (int frame = 0; frame < 3; ++frame) {
+        AgcDriver::Graphics::NoteHostImportFrame();
+        Dispatch(device, read, written, output);
+    }
+    Require(AgcDriver::Graphics::TieredHeapCounters().gpuReadWindows > before.gpuReadWindows, "resident heap mirror: the shader's reads through the BDA table did not mark the window it read");
+    AgcDriver::Graphics::SetTieredHeapDeviceReport(64 * Window, 64 * Window);
+    AgcDriver::Graphics::NoteHostImportFrame();
+    Dispatch(device, read, written, output);
+    CheckReads(output, "tiered heap after a demotion", false);
+    Require(AgcDriver::Graphics::TieredHeapCounters().demotions == before.demotions + 1, "resident heap mirror: VRAM over its budget did not demote a tiered heap window");
+    Require(AgcDriver::Graphics::ExistingHostImportFor(context, read.Address() + Window, Window) != nullptr, "resident heap mirror: the window only the CPU wrote was not the one demoted");
+    Require(AgcDriver::Graphics::ExistingHostImportFor(context, read.Address(), Window) == nullptr, "resident heap mirror: the window the GPU reads every frame was demoted");
+    AgcDriver::Graphics::SetTieredHeapDeviceReport(0, 0);
+    AgcDriver::Graphics::SetTieredHeapMoves(-1, 0);
+    AgcDriver::Graphics::SetTieredHeapVramBudget(0);
+    AgcDriver::Graphics::SetTieredHeapMinBytes(0);
+    AgcDriver::Graphics::SetTieredHeaps(-1);
+    AgcDriver::Graphics::SetHostImportRangeWindow(std::uint64_t{64} << 20u);
+}
+
 void StagingChunkTests(AgcDriver::VulkanDevice& device) {
     constexpr std::uint64_t LargeBytes = 48u << 20u;
     constexpr std::uint64_t ChunkBoundary = 32u << 20u;
@@ -664,6 +704,7 @@ int main() {
         if (sparse) {
             ResidentTests(*device);
             TieredMoveTests(*device);
+            TieredReadTests(*device);
             StagingChunkTests(*device);
             ReusedAddressTests(*device);
             JoinedImportTests(*device);

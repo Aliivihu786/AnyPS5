@@ -15176,6 +15176,10 @@ int main(int argc, char** argv) {
             Require(mock.live == 0, "the tiered sparse heap test leaked Vulkan objects");
             return 0;
         }
+        if (argc == 2 && std::string_view(argv[1]) == "--graphics-preset") {
+            RunGraphicsPresetTests();
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--tiered-heap-moves") {
             {
                 mock = MockVulkan{};

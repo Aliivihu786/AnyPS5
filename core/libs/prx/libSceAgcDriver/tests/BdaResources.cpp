@@ -3223,7 +3223,7 @@ void faultSlotTests(const Context& shared, const BdaTestAccess& access) {
         reportChunks.insert(reports.back()->Fault().buffer);
     }
     std::snprintf(message, sizeof(message), "64 report-only BdaResources hold %zu fault chunks with %llu-byte slots", reportChunks.size(), static_cast<unsigned long long>(reports.front()->Fault().range));
-    Require(reportChunks.size() == 1 && reports.front()->Fault().range == sizeof(ShaderRecompiler::BdaAbi::Fault), message);
+    Require(reportChunks.size() == 1 && reports.front()->Fault().range == ShaderRecompiler::BdaAbi::ReportBufferBytes, message);
     Require(!sameFaultMemory(reports[0]->Fault(), reports[1]->Fault()), "two report-only BdaResources share fault memory");
     writeUnmappedFault(slotBytes(access, reports[0]->Fault()), 0x7fff55550000ULL);
     writeUnmappedFault(slotBytes(access, reports[1]->Fault()), 0x7fff66660000ULL);
@@ -3242,7 +3242,7 @@ void faultSlotTests(const Context& shared, const BdaTestAccess& access) {
     ShaderResources rectResources(disabled, rectStages, ColorTarget{}, 0, 0, 0, {});
     const auto rectSlot = access.descriptor(rectList.control.bindings.front().binding);
     std::snprintf(message, sizeof(message), "the rect-list check, which writes only the fault report, was bound %llu bytes of fault buffer", static_cast<unsigned long long>(rectSlot.range));
-    Require(rectSlot.range == sizeof(ShaderRecompiler::BdaAbi::Fault), message);
+    Require(rectSlot.range == ShaderRecompiler::BdaAbi::ReportBufferBytes, message);
     writeUnmappedFault(slotBytes(access, rectSlot), 0x7fff77770000ULL);
     reject([&] { rectResources.CheckFaults(); }, "address=0x7fff77770000");
 }
@@ -4644,7 +4644,7 @@ void RunTieredSparseHeapTests(const Context& context, const BdaTestAccess& acces
         Require(guest[3 * window + 8] == std::byte{0x5d}, "a CPU store into an imported window was lost");
         leased.WriteBack();
     }
-    SetHostImportBudget(live + window);
+    SetTieredHeapHostReport(16 * window, 16 * window - window / 2);
     commit(8 * window, window);
     std::memset(guest + 8 * window, 0x44, window);
     {
@@ -4666,8 +4666,8 @@ void RunTieredSparseHeapTests(const Context& context, const BdaTestAccess& acces
         Require(data[0] == std::byte{0x44} && data[window - 1] == std::byte{0x44}, "a window whose import the budget refused lost its bytes in the heap mirror");
         leased.WriteBack();
     }
-    SetHostImportBudget(live + reserved);
-    SetTieredHeapHostReport(16 * window, 16 * window - window / 2);
+    SetTieredHeapHostReport(0, 0);
+    SetHostImportBudget(live + window);
     commit(9 * window, window);
     std::memset(guest + 9 * window, 0x45, window);
     {
@@ -4675,12 +4675,8 @@ void RunTieredSparseHeapTests(const Context& context, const BdaTestAccess& acces
         GuestBufferMemory leased(importing);
         leased.AcquireRegistered();
         leased.Upload(true);
-        Require(TieredHeapCounters().fallbacks > refusals, "a window was imported although the host heap's reported usage left no room");
-        Require(ExistingHostImportFor(importing, base + 9 * window, window) == nullptr, "a window past the host heap's reported budget has a host import");
-        std::uint32_t adjustment = 0;
-        const auto view = leased.Descriptor(base + 9 * window, window, adjustment);
-        const auto data = access.bytes(view.buffer).subspan(view.offset + adjustment);
-        Require(data[0] == std::byte{0x45} && data[window - 1] == std::byte{0x45}, "a window kept out of the full host heap lost its bytes in the heap mirror");
+        Require(TieredHeapCounters().fallbacks == refusals, "a window past the host import budget was refused although the host heap has room");
+        Require(ExistingHostImportFor(importing, base + 9 * window, window) != nullptr, "a window past the host import budget was not imported within the host heap's room");
         leased.WriteBack();
     }
     SetTieredHeapHostReport(0, 0);
@@ -4780,6 +4776,27 @@ void RunTieredSparseHeapTests(const Context& context, const BdaTestAccess& acces
     releaseSparse(full, whole);
 #endif
     std::cout << "a tiered sparse heap keeps windows within the VRAM budget in its mirror, imports committed windows past it, and mirrors a window whose import the budget refuses; a fully committed heap is tiered the same way\n";
+}
+
+void RunGraphicsPresetTests() {
+    const auto card = [](VkDeviceSize gib) {
+        VkPhysicalDeviceMemoryProperties memory{};
+        memory.memoryHeapCount = 2;
+        memory.memoryHeaps[0] = {gib << 30u, VK_MEMORY_HEAP_DEVICE_LOCAL_BIT};
+        memory.memoryHeaps[1] = {VkDeviceSize{16} << 30u, 0};
+        return memory;
+    };
+    Require(ParseGraphicsPreset(nullptr, card(6)) == GraphicsPreset::None && ParseGraphicsPreset("", card(6)) == GraphicsPreset::None, "an unset graphics preset selected one");
+    Require(ParseGraphicsPreset("low", card(24)) == GraphicsPreset::Low && ParseGraphicsPreset("medium", card(6)) == GraphicsPreset::Medium && ParseGraphicsPreset("high", card(6)) == GraphicsPreset::High, "a named graphics preset was not taken as named");
+    Require(ParseGraphicsPreset("auto", card(6)) == GraphicsPreset::Low && ParseGraphicsPreset("auto", card(8)) == GraphicsPreset::Medium && ParseGraphicsPreset("auto", card(16)) == GraphicsPreset::High, "ANYPS5_GRAPHICS_PRESET=auto did not pick low for 6 GiB, medium for 8 GiB and high for 16 GiB of VRAM");
+    bool rejected = false;
+    try {
+        static_cast<void>(ParseGraphicsPreset("ultra", card(6)));
+    } catch (const std::runtime_error& error) {
+        rejected = std::string_view(error.what()).find("ultra") != std::string_view::npos;
+    }
+    Require(rejected, "an unknown graphics preset was not rejected by name");
+    std::cout << "ANYPS5_GRAPHICS_PRESET takes low, medium and high as named, picks one from the VRAM for auto and rejects other names\n";
 }
 
 void RunTieredHeapMoveTests(const Context& context, const BdaTestAccess& access) {

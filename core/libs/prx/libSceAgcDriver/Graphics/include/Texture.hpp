@@ -26,6 +26,10 @@
 
 namespace AgcDriver::Graphics {
 
+enum class GraphicsPreset : std::uint8_t { None, Low, Medium, High };
+GraphicsPreset ActiveGraphicsPreset(const VkPhysicalDeviceMemoryProperties& memory);
+GraphicsPreset ParseGraphicsPreset(const char* name, const VkPhysicalDeviceMemoryProperties& memory);
+
 class Buffer;
 class ResidentColor;
 class CommandBatch;

@@ -453,6 +453,40 @@ void RunBdaExecutionTests(const Context& context) {
     run(guest, 8, 0, Abi::FaultReason::InvalidTable, 3);
     run(std::numeric_limits<std::uint64_t>::max() - 2, 8, 0, Abi::FaultReason::Overflow, 2, 1, 4);
     run(1, 8, 0, Abi::FaultReason::Overflow, 2, 1, -4);
+    {
+        Buffer flags(context, Abi::FaultBufferBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        const auto readSlot = [&](std::uint32_t slot, Abi::FaultReason reason) {
+            auto marked = ranges;
+            marked[1].reserved = slot;
+            const Abi::Header header{Abi::Version, 2, sizeof(Abi::Range), 0};
+            std::memcpy(table.Bytes().data(), &header, sizeof(header));
+            std::memcpy(table.Bytes().data() + sizeof(header), marked.data(), sizeof(marked));
+            std::memset(flags.Bytes().data(), 0, flags.Bytes().size());
+            const std::uint32_t sentinel = 0xdeadbeef;
+            std::memcpy(output.Bytes().data(), &sentinel, sizeof(sentinel));
+            Pipeline pipeline(context, MakeBdaTestShader(guest + 3, 8, 0), {&table, &flags, &output});
+            pipeline.Run(1);
+            std::vector<std::uint32_t> words(Abi::FaultBufferBytes / sizeof(std::uint32_t));
+            std::memcpy(words.data(), flags.Bytes().data(), Abi::FaultBufferBytes);
+            Abi::Fault report{};
+            std::memcpy(&report, words.data(), sizeof(report));
+            std::vector<std::uint32_t> marks;
+            Abi::ForEachReadSlot(words.data(), [&](std::uint32_t found) { marks.push_back(found); });
+            if (static_cast<std::uint32_t>(reason) != 0) {
+                Require(report.state == Abi::FaultState::Ready && report.reason == reason && marks.empty(), "a BDA range with a read slot past the read flags was not refused as an invalid table");
+                return;
+            }
+            std::uint32_t result = 0;
+            std::memcpy(&result, output.Bytes().data(), sizeof(result));
+            Require(report.state == Abi::FaultState::Empty && result == 0x44u, "a BDA read through a range with a read slot produced incorrect data or a fault");
+            Require(slot == 0 ? marks.empty() : marks == std::vector<std::uint32_t>{slot}, "a BDA read did not set exactly its range's read slot flag");
+        };
+        readSlot(0, static_cast<Abi::FaultReason>(0));
+        readSlot(1, static_cast<Abi::FaultReason>(0));
+        readSlot(37, static_cast<Abi::FaultReason>(0));
+        readSlot(Abi::ReadFlagSlots, static_cast<Abi::FaultReason>(0));
+        readSlot(Abi::ReadFlagSlots + 1, Abi::FaultReason::InvalidTable);
+    }
     Buffer words(context, 16, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     const auto read = [&](std::uint64_t address, std::uint32_t dwords, bool coherent, bool stops, std::uint32_t value, bool faults) {
         const Abi::Header header{Abi::Version, 2, sizeof(Abi::Range), 0};
@@ -631,7 +665,7 @@ void RunBdaFaultSlotExecutionTests(const Context& context) {
     BdaResources second(context, true);
     const auto firstSlot = first.Fault();
     const auto secondSlot = second.Fault();
-    Require(firstSlot.buffer == secondSlot.buffer && firstSlot.range == sizeof(Abi::Fault) && secondSlot.range == sizeof(Abi::Fault) && firstSlot.offset != secondSlot.offset, "two report-only BdaResources did not take 32-byte slots of one fault chunk");
+    Require(firstSlot.buffer == secondSlot.buffer && firstSlot.range == Abi::ReportBufferBytes && secondSlot.range == Abi::ReportBufferBytes && firstSlot.offset != secondSlot.offset, "two report-only BdaResources did not take report slots of one fault chunk");
     Pipeline firstPipeline(context, MakeBdaFaultSequenceTestShader({Abi::FaultReason::Unmapped}, 0x7fff11110000ULL), {tableInfo, firstSlot, outputInfo});
     Pipeline secondPipeline(context, MakeBdaFaultSequenceTestShader({Abi::FaultReason::Unmapped}, 0x7fff22220000ULL), {tableInfo, secondSlot, outputInfo});
     Pipeline::RunTogether(context, {&firstPipeline, &secondPipeline});
