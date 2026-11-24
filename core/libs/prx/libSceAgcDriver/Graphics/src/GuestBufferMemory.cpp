@@ -3754,6 +3754,7 @@ std::uint64_t tieredMoveFrames() {
 
 constexpr std::uint64_t TieredMoveCooldownPlans = 16;
 constexpr std::uint64_t TieredActivePlans = 8;
+constexpr std::size_t TieredMaxDemotions = 8;
 
 enum class WindowTier : std::uint8_t { Empty, Vram, Ram };
 
@@ -5658,38 +5659,47 @@ void planTieredMoves(const Context& context) {
     const auto limit = budget - budget / 8u;
     const auto expected = usage - std::min(usage, pending);
     const auto movable = [&](const TieredHeap& shape, std::size_t index) { return shape.moved[index] == 0 || shape.moved[index] + TieredMoveCooldownPlans <= plan; };
-    std::optional<std::pair<std::uint64_t, std::size_t>> chosen;
+    std::vector<std::pair<std::uint64_t, std::size_t>> chosen;
     WindowTier target = WindowTier::Empty;
     if (expected > limit) {
-        const auto importRoom = tieredHostRoom(context);
-        std::uint64_t coldest = std::numeric_limits<std::uint64_t>::max();
+        auto room = tieredHostRoom(context);
+        std::vector<std::tuple<std::uint64_t, std::uint64_t, std::size_t, std::uint64_t>> candidates;
         for (const auto& shape : shapes) {
-            if (importRoom < shape.window) continue;
             for (std::size_t index = 0; index < shape.tiers.size(); ++index) {
-                if (shape.tiers[index] != WindowTier::Vram || !movable(shape, index) || shape.active[index] >= coldest) continue;
-                coldest = shape.active[index];
-                chosen = std::pair{shape.base, index};
+                if (shape.tiers[index] == WindowTier::Vram && movable(shape, index)) candidates.emplace_back(shape.active[index], shape.base, index, shape.window);
             }
+        }
+        std::sort(candidates.begin(), candidates.end());
+        auto excess = expected - limit;
+        for (const auto& [active, base, index, window] : candidates) {
+            if (excess == 0 || chosen.size() == TieredMaxDemotions || room < window) break;
+            chosen.emplace_back(base, index);
+            room -= window;
+            excess -= std::min(excess, window);
         }
         target = WindowTier::Ram;
     } else {
         std::uint64_t hottest = 0;
+        std::optional<std::pair<std::uint64_t, std::size_t>> best;
         for (const auto& shape : shapes) {
             if (expected + 2 * shape.window >= limit) continue;
             for (std::size_t index = 0; index < shape.tiers.size(); ++index) {
                 if (shape.tiers[index] != WindowTier::Ram || !movable(shape, index) || shape.active[index] + TieredActivePlans < plan || shape.active[index] <= hottest) continue;
                 hottest = shape.active[index];
-                chosen = std::pair{shape.base, index};
+                best = std::pair{shape.base, index};
             }
         }
+        if (best) chosen.push_back(*best);
         target = WindowTier::Vram;
     }
-    if (!chosen) return;
+    if (chosen.empty()) return;
     {
         std::lock_guard lock(tiered.mutex);
-        const auto found = tiered.heaps.find(chosen->first);
-        if (found == tiered.heaps.end() || chosen->second >= found->second.tiers.size()) return;
-        found->second.moves.emplace_back(chosen->second, target);
+        for (const auto& [base, index] : chosen) {
+            const auto found = tiered.heaps.find(base);
+            if (found == tiered.heaps.end() || index >= found->second.tiers.size()) continue;
+            found->second.moves.emplace_back(index, target);
+        }
     }
     auto& state = Imports();
     std::lock_guard lock(state.mutex);

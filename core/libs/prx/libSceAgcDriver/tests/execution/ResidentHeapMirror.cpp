@@ -369,7 +369,7 @@ void TieredReadTests(AgcDriver::VulkanDevice& device) {
         Dispatch(device, read, written, output);
     }
     Require(AgcDriver::Graphics::TieredHeapCounters().gpuReadWindows > before.gpuReadWindows, "resident heap mirror: the shader's reads through the BDA table did not mark the window it read");
-    AgcDriver::Graphics::SetTieredHeapDeviceReport(64 * Window, 64 * Window);
+    AgcDriver::Graphics::SetTieredHeapDeviceReport(64 * Window, 56 * Window + Window / 2);
     AgcDriver::Graphics::NoteHostImportFrame();
     Dispatch(device, read, written, output);
     CheckReads(output, "tiered heap after a demotion", false);
